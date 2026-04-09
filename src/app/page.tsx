@@ -5,13 +5,14 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
 interface PaymentRecord {
-  mode: 'Cash' | 'UPI' | 'Card' | 'Bank Transfer';
+  mode: 'Cash' | 'UPI' | 'Credit Card' | 'Debit Card' | 'Netbanking' | 'Exchange';
   amount: number;
 }
 
 interface TransactionRecord {
   id: string;
   type: 'Sale' | 'Purchase';
+  partyName: string;
   productName: string;
   imeiNo: string;
   date: string;
@@ -57,6 +58,7 @@ const AccountantDashboard = () => {
 
   // Form State
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
+  const [formPartyName, setFormPartyName] = useState('');
   const [formProduct, setFormProduct] = useState('');
   const [formImei, setFormImei] = useState('');
   const [formPurchasePrice, setFormPurchasePrice] = useState<number | ''>('');
@@ -107,6 +109,7 @@ const AccountantDashboard = () => {
     const txData: TransactionRecord = {
       id: editingId || `TX${String(transactions.length + 1).padStart(3, '0')}`,
       type: modalType,
+      partyName: formPartyName || 'General',
       productName: formProduct,
       imeiNo: formImei,
       date: formDate,
@@ -127,6 +130,7 @@ const AccountantDashboard = () => {
   };
 
   const resetForm = () => {
+    setFormPartyName('');
     setFormProduct('');
     setFormImei('');
     setFormPurchasePrice('');
@@ -146,6 +150,7 @@ const AccountantDashboard = () => {
     setEditingId(tx.id);
     setModalType(tx.type);
     setFormDate(tx.date);
+    setFormPartyName(tx.partyName || '');
     setFormProduct(tx.productName);
     setFormImei(tx.imeiNo);
     setFormPurchasePrice(tx.purchasePrice);
@@ -165,18 +170,37 @@ const AccountantDashboard = () => {
     let totalSales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0;
     let todaySales = 0, todayPurchases = 0;
     const todayDate = new Date().toISOString().split('T')[0];
+    
+    // Tracking Payments and Dues
+    const salesPaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
+    const purchasePaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
+    const pendingSalesDues: {name: string, due: number}[] = [];
+    const pendingPurchaseDues: {name: string, due: number}[] = [];
 
     salesTx.forEach(tx => {
       totalSales += tx.sellingPrice;
       const tProfit = tx.sellingPrice - tx.purchasePrice;
       if (tProfit > 0) totalProfit += tProfit;
       else if (tProfit < 0) totalLoss += Math.abs(tProfit);
-      
       if (tx.date === todayDate) todaySales++;
+      
+      let paid = 0;
+      tx.paymentRecords.forEach(pr => {
+          salesPaymentTotals[pr.mode] = (salesPaymentTotals[pr.mode] || 0) + pr.amount;
+          paid += pr.amount;
+      });
+      if (paid < tx.sellingPrice) pendingSalesDues.push({ name: tx.partyName, due: tx.sellingPrice - paid });
     });
+
     purchaseTx.forEach(tx => {
       totalPurchases += tx.purchasePrice;
       if (tx.date === todayDate) todayPurchases++;
+      let paid = 0;
+      tx.paymentRecords.forEach(pr => {
+          purchasePaymentTotals[pr.mode] = (purchasePaymentTotals[pr.mode] || 0) + pr.amount;
+          paid += pr.amount;
+      });
+      if (paid < tx.purchasePrice) pendingPurchaseDues.push({ name: tx.partyName, due: tx.purchasePrice - paid });
     });
 
     // Document Header & Logo
@@ -204,20 +228,40 @@ const AccountantDashboard = () => {
     doc.text(`Items Sold Today: ${todaySales}`, 14, 66);
     doc.text(`Items Purchased Today: ${todayPurchases}`, 14, 72);
 
-    let currentY = 82;
+    // Payment Breakdowns (Top Right)
+    const rightX = 105;
+    const rightX2 = 160;
+    doc.setFont('helvetica', 'bold');
+    doc.text("Sales Pyts:", rightX, 36);
+    doc.text("Purchases Pyts:", rightX2, 36);
+    doc.setFont('helvetica', 'normal');
+    
+    let pyS = 42;
+    let pyP = 42;
+    Object.entries(salesPaymentTotals).forEach(([mode, amount]) => {
+      if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX, pyS); pyS += 6; }
+    });
+    Object.entries(purchasePaymentTotals).forEach(([mode, amount]) => {
+      if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX2, pyP); pyP += 6; }
+    });
+
+    let currentY = Math.max(pyS, pyP, 80) + 10;
 
     // --- SALES SECTION ---
     if (salesTx.length > 0) {
       doc.setFontSize(14);
       doc.text("Sales Ledger", 14, currentY);
       
-      const salesColumn = ["ID", "Date", "Product & IMEI", "Pur. Price", "Sell Price", "Status"];
+      const formatPayments = (records: PaymentRecord[]) => records.map(p => `${p.amount} ${p.mode}`).join(', ');
+      
+      const salesColumn = ["ID", "Date", "Customer / Product\n& IMEI", "Pur. Price", "Sell Price", "Payments", "Status"];
       const salesRows = salesTx.map(tx => [
         tx.id,
         tx.date,
-        `${tx.productName}\n(${tx.imeiNo})`,
+        `[${tx.partyName}]\n${tx.productName}\n(${tx.imeiNo})`,
         `Rs. ${tx.purchasePrice}`,
         `Rs. ${tx.sellingPrice}`,
+        formatPayments(tx.paymentRecords),
         tx.paymentStatus
       ]);
 
@@ -237,12 +281,15 @@ const AccountantDashboard = () => {
       doc.setFontSize(14);
       doc.text("Purchases Ledger", 14, currentY);
       
-      const purColumn = ["ID", "Date", "Product & IMEI", "Pur. Price", "Status"];
+      const formatPayments = (records: PaymentRecord[]) => records.map(p => `${p.amount} ${p.mode}`).join(', ');
+
+      const purColumn = ["ID", "Date", "Vendor / Product\n& IMEI", "Pur. Price", "Payments", "Status"];
       const purRows = purchaseTx.map(tx => [
         tx.id,
         tx.date,
-        `${tx.productName}\n(${tx.imeiNo})`,
+        `[${tx.partyName}]\n${tx.productName}\n(${tx.imeiNo})`,
         `Rs. ${tx.purchasePrice}`,
+        formatPayments(tx.paymentRecords),
         tx.paymentStatus
       ]);
 
@@ -253,6 +300,27 @@ const AccountantDashboard = () => {
         styles: { cellWidth: 'wrap', fontSize: 9 },
         headStyles: { fillColor: [16, 185, 129] } // Emerald
       });
+      currentY = (doc as any).lastAutoTable.finalY + 15;
+    }
+
+    // --- DUES SECTION ---
+    if (pendingSalesDues.length > 0 || pendingPurchaseDues.length > 0) {
+       doc.setFontSize(14);
+       doc.text("Pending Dues Ledger", 14, currentY);
+       
+       const duesCol = ["Role", "Customer / Vendor Name", "Due Amount"];
+       const duesRows: any[] = [];
+       pendingSalesDues.forEach(d => duesRows.push(["Sale (You will receive)", d.name, `Rs. ${d.due}`]));
+       pendingPurchaseDues.forEach(d => duesRows.push(["Purchase (You owe)", d.name, `Rs. ${d.due}`]));
+
+       autoTable(doc, {
+         head: [duesCol],
+         body: duesRows,
+         startY: currentY + 4,
+         styles: { cellWidth: 'wrap', fontSize: 9 },
+         headStyles: { fillColor: [239, 68, 68] } // Red for warnings
+       });
+       currentY = (doc as any).lastAutoTable.finalY + 15;
     }
 
     if (salesTx.length === 0 && purchaseTx.length === 0) {
@@ -336,10 +404,16 @@ const AccountantDashboard = () => {
                     <label className="block text-xs font-semibold mb-1 text-slate-500">Product Name</label>
                     <input required type="text" value={formProduct} onChange={e => setFormProduct(e.target.value)} placeholder="e.g. iPhone 15 Pro" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
                   </div>
-                  <div className="md:col-span-2">
+                  <div className={remainingAmount > 0 ? "" : "md:col-span-2"}>
                     <label className="block text-xs font-semibold mb-1 text-slate-500">IMEI Number</label>
                     <input required type="text" value={formImei} onChange={e => setFormImei(e.target.value)} placeholder="15-digit IMEI" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 tracking-widest font-mono" />
                   </div>
+                  {remainingAmount > 0 && (
+                    <div className="animate-in fade-in zoom-in duration-300">
+                      <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : 'Vendor Name (Due)'}</label>
+                      <input required type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -382,8 +456,10 @@ const AccountantDashboard = () => {
                         <select value={payMode} onChange={e => setPayMode(e.target.value as any)} className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 outline-none focus:border-indigo-500 cursor-pointer">
                           <option value="Cash">Cash</option>
                           <option value="UPI">UPI</option>
-                          <option value="Card">Card</option>
-                          <option value="Bank Transfer">Bank Transfer</option>
+                          <option value="Credit Card">Credit Card</option>
+                          <option value="Debit Card">Debit Card</option>
+                          <option value="Netbanking">Netbanking</option>
+                          <option value="Exchange">Exchange</option>
                         </select>
                         <button type="button" onClick={addPayment} className="bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 font-bold px-4 rounded-lg hover:opacity-90 cursor-pointer">Add</button>
                     </div>
@@ -536,6 +612,7 @@ const AccountantDashboard = () => {
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex flex-col">
+                            <span className="font-bold text-xs text-slate-500 mb-0.5 uppercase">{tx.partyName}</span>
                             <span className="font-semibold text-sm">{tx.productName}</span>
                             <span className="text-xs font-mono text-slate-500 mt-0.5 bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded w-max border border-slate-200 dark:border-slate-700">IMEI: {tx.imeiNo}</span>
                           </div>
