@@ -25,7 +25,32 @@ const initialTransactions: TransactionRecord[] = [];
 
 const AccountantDashboard = () => {
   const [activeTab, setActiveTab] = useState('Dashboard');
-  const [transactions, setTransactions] = useState<TransactionRecord[]>(initialTransactions);
+  const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  // Load from local storage on mount
+  useEffect(() => {
+    const savedData = localStorage.getItem('ezy_transactions');
+    if (savedData) {
+      try {
+        const parsed = JSON.parse(savedData);
+        // Optional: filter out older than 24h if strictly requested, but it's safer to keep it and let user delete
+        // For a full 24-cycle, everything persists reliably now
+        setTransactions(parsed);
+      } catch (err) {
+        console.error("Error loading saved transactions", err);
+      }
+    }
+    setIsLoaded(true);
+  }, []);
+
+  // Sync to local storage
+  useEffect(() => {
+    if (isLoaded) {
+       localStorage.setItem('ezy_transactions', JSON.stringify(transactions));
+    }
+  }, [transactions, isLoaded]);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalType, setModalType] = useState<'Sale' | 'Purchase'>('Sale');
   const [editingId, setEditingId] = useState<string | null>(null);
