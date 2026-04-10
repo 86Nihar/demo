@@ -35,6 +35,8 @@ interface TransactionRecord {
 
   paymentRecords: PaymentRecord[];
   paymentStatus: 'Paid' | 'Partial' | 'Pending';
+  remark?: string;
+  gift?: string;
 }
 
 const getTxItems = (tx: TransactionRecord): TransactionItem[] => {
@@ -96,6 +98,8 @@ const AccountantDashboard = () => {
         items: row.items,
         paymentRecords: row.payment_records,
         paymentStatus: row.payment_status,
+        remark: row.remark,
+        gift: row.gift,
       }));
       setTransactions(mapped);
     }
@@ -117,6 +121,8 @@ const AccountantDashboard = () => {
 
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
   const [formPartyName, setFormPartyName] = useState('');
+  const [formRemark, setFormRemark] = useState('');
+  const [formGift, setFormGift] = useState('');
   
   const [formItems, setFormItems] = useState([{
     productName: '',
@@ -197,7 +203,9 @@ const AccountantDashboard = () => {
       date: formDate,
       items: mappedItems,
       payment_records: formPayments,
-      payment_status: status
+      payment_status: status,
+      remark: formRemark,
+      gift: formGift
     };
 
     if (editingId) {
@@ -219,6 +227,8 @@ const AccountantDashboard = () => {
 
   const resetForm = () => {
     setFormPartyName('');
+    setFormRemark('');
+    setFormGift('');
     setFormItems([{ productName: '', imeiNo: '', purchasePrice: '', sellingPrice: '' }]);
     setFormPayments([]);
     setPayAmount('');
@@ -236,6 +246,8 @@ const AccountantDashboard = () => {
     setModalType(tx.type);
     setFormDate(tx.date);
     setFormPartyName(tx.partyName || '');
+    setFormRemark(tx.remark || '');
+    setFormGift(tx.gift || '');
     
     const itemsToEdit = getTxItems(tx).map(it => ({
        productName: it.productName,
@@ -271,8 +283,7 @@ const AccountantDashboard = () => {
     const purchaseTx = filteredTx.filter(t => t.type === 'Purchase');
 
     let totalSales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0;
-    let todaySalesItemCount = 0, todayPurchasesItemCount = 0;
-    const todayDate = new Date().toISOString().split('T')[0];
+    let reportSalesItemCount = 0, reportPurchasesItemCount = 0;
     
     const salesPaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
     const purchasePaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
@@ -287,7 +298,7 @@ const AccountantDashboard = () => {
       const tProfit = txSell - txPur;
       if (tProfit > 0) totalProfit += tProfit;
       else if (tProfit < 0) totalLoss += Math.abs(tProfit);
-      if (tx.date === todayDate) todaySalesItemCount += getTxItems(tx).length;
+      reportSalesItemCount += getTxItems(tx).length;
       
       let paid = 0;
       tx.paymentRecords.forEach(pr => {
@@ -301,7 +312,7 @@ const AccountantDashboard = () => {
       const txPur = getTxTotalPurchase(tx);
 
       totalPurchases += txPur;
-      if (tx.date === todayDate) todayPurchasesItemCount += getTxItems(tx).length;
+      reportPurchasesItemCount += getTxItems(tx).length;
       let paid = 0;
       tx.paymentRecords.forEach(pr => {
           purchasePaymentTotals[pr.mode] = (purchasePaymentTotals[pr.mode] || 0) + pr.amount;
@@ -326,24 +337,23 @@ const AccountantDashboard = () => {
     }
 
     doc.setFontSize(11);
-    doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 14, 32);
-    doc.text(`Report Period: ${reportFilter === 'All' ? 'All Time' : reportTitleStr.replace('Report: ', '')}`, 14, 38);
-    doc.text(`Total Sales: Rs. ${totalSales}`, 14, 44);
-    doc.text(`Total Purchases: Rs. ${totalPurchases}`, 14, 50);
-    doc.text(`Total Generated Profit: Rs. ${totalProfit}`, 14, 56);
-    doc.text(`Total Loss: Rs. ${totalLoss}`, 14, 62);
-    doc.text(`Listed Sale Items: ${todaySalesItemCount}`, 14, 68);
-    doc.text(`Listed Purchase Items: ${todayPurchasesItemCount}`, 14, 74);
+    doc.text(`Report Period: ${reportFilter === 'All' ? 'All Time' : reportTitleStr.replace('Report: ', '')}`, 14, 32);
+    doc.text(`Total Sales: Rs. ${totalSales}`, 14, 38);
+    doc.text(`Total Purchases: Rs. ${totalPurchases}`, 14, 44);
+    doc.text(`Total Generated Profit: Rs. ${totalProfit}`, 14, 50);
+    doc.text(`Total Loss: Rs. ${totalLoss}`, 14, 56);
+    doc.text(`Listed Sale Items: ${reportSalesItemCount}`, 14, 62);
+    doc.text(`Listed Purchase Items: ${reportPurchasesItemCount}`, 14, 68);
 
     const rightX = 105;
     const rightX2 = 160;
     doc.setFont('helvetica', 'bold');
-    doc.text("Sales Pyts:", rightX, 38);
-    doc.text("Purchases Pyts:", rightX2, 38);
+    doc.text("Sales Pyts:", rightX, 32);
+    doc.text("Purchases Pyts:", rightX2, 32);
     doc.setFont('helvetica', 'normal');
     
-    let pyS = 44;
-    let pyP = 44;
+    let pyS = 38;
+    let pyP = 38;
     Object.entries(salesPaymentTotals).forEach(([mode, amount]) => {
       if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX, pyS); pyS += 6; }
     });
@@ -360,13 +370,15 @@ const AccountantDashboard = () => {
       doc.text("Sales Ledger", 14, currentY);
       
       const salesColumn = ["No.", "Date", "Customer & Items", "Pur. Price", "Sell Price", "Payments", "Status"];
-      const salesRows = salesTx.map(tx => {
+      const salesRows = salesTx.map((tx, idx) => {
          const itemsStr = getTxItems(tx).map(it => `• ${it.productName} (${it.imeiNo})`).join('\n');
          const partyStr = (tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-') ? `[${tx.partyName}]\n` : '';
+         const giftStr = tx.gift ? `\n[Gift: ${tx.gift}]` : '';
+         const remarkStr = tx.remark ? `\n(Note: ${tx.remark})` : '';
          return [
-           tx.id,
+           idx + 1,
            tx.date,
-           `${partyStr}${itemsStr}`,
+           `${partyStr}${itemsStr}${giftStr}${remarkStr}`,
            `Rs. ${getTxTotalPurchase(tx)}`,
            `Rs. ${getTxTotalSelling(tx)}`,
            formatPayments(tx.paymentRecords),
@@ -383,13 +395,14 @@ const AccountantDashboard = () => {
       doc.text("Purchases Ledger", 14, currentY);
 
       const purColumn = ["No.", "Date", "Vendor & Items", "Pur. Price", "Payments", "Status"];
-      const purRows = purchaseTx.map(tx => {
+      const purRows = purchaseTx.map((tx, idx) => {
          const itemsStr = getTxItems(tx).map(it => `• ${it.productName} (${it.imeiNo})`).join('\n');
          const partyStr = (tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-') ? `[${tx.partyName}]\n` : '';
+         const remarkStr = tx.remark ? `\n(Note: ${tx.remark})` : '';
          return [
-           tx.id,
+           idx + 1,
            tx.date,
-           `${partyStr}${itemsStr}`,
+           `${partyStr}${itemsStr}${remarkStr}`,
            `Rs. ${getTxTotalPurchase(tx)}`,
            formatPayments(tx.paymentRecords),
            tx.paymentStatus
@@ -438,36 +451,53 @@ const AccountantDashboard = () => {
 
   const stats = useMemo(() => {
     let totalsales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0, todaySalesCount = 0, todayPurchasesCount = 0;
+    let totalDebit = 0, totalCredit = 0, openingCredit = 0, openingDebit = 0;
     const todayStr = new Date().toISOString().split('T')[0];
 
     transactions.forEach(tx => {
       const txPur = getTxTotalPurchase(tx);
       const txSell = getTxTotalSelling(tx);
+      const isToday = tx.date === todayStr;
+      
+      let txPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
 
       if (tx.type === 'Sale') {
         totalsales += txSell;
+        totalCredit += txPaid;
+        if (!isToday && tx.date < todayStr) openingCredit += txPaid;
+
         const diff = txSell - txPur;
         if (diff > 0) totalProfit += diff;
         else if (diff < 0) totalLoss += Math.abs(diff);
-        if (tx.date === todayStr) todaySalesCount += getTxItems(tx).length;
+        if (isToday) todaySalesCount += getTxItems(tx).length;
       } else {
         totalPurchases += txPur;
-        if (tx.date === todayStr) todayPurchasesCount += getTxItems(tx).length;
+        totalDebit += txPaid;
+        if (!isToday && tx.date < todayStr) openingDebit += txPaid;
+
+        if (isToday) todayPurchasesCount += getTxItems(tx).length;
       }
     });
 
-    return [
-      { label: 'Total Sales Revenue', value: `₹${totalsales.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
-      { label: 'Total Purchases Expense', value: `₹${totalPurchases.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
-      { label: 'Total Profit', value: `₹${totalProfit.toLocaleString()}`, icon: '🚀', color: 'text-indigo-500', bg: 'bg-indigo-50 dark:bg-indigo-900/20' },
-      { label: 'Total Loss', value: `₹${totalLoss.toLocaleString()}`, icon: '📉', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
-      { label: 'Items Sold Today', value: todaySalesCount.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
-      { label: 'Purchased Today', value: todayPurchasesCount.toString(), icon: '🛒', color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-900/20' },
-    ];
+    const openingBalance = openingCredit - openingDebit;
+    const closingBalance = totalCredit - totalDebit;
+
+    return {
+      cards: [
+        { label: 'Total Sales Revenue', value: `₹${totalsales.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Total Purchases Expense', value: `₹${totalPurchases.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
+        { label: 'Total Profit', value: `₹${totalProfit.toLocaleString()}`, icon: '🚀', color: 'text-indigo-500', bg: 'bg-indigo-50 dark:bg-indigo-900/20' },
+        { label: 'Total Loss', value: `₹${totalLoss.toLocaleString()}`, icon: '📉', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
+        { label: 'Items Sold Today', value: todaySalesCount.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
+        { label: 'Purchased Today', value: todayPurchasesCount.toString(), icon: '🛒', color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-900/20' },
+      ],
+      details: { totalDebit, totalCredit, openingBalance, closingBalance, totalProfit, totalLoss }
+    };
   }, [transactions]);
 
   const displayList = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
                       activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : transactions;
+
 
   return (
     <div className="flex min-h-screen bg-[#f8fafc] dark:bg-[#0f172a] text-slate-900 dark:text-slate-100 font-sans">
@@ -545,7 +575,7 @@ const AccountantDashboard = () => {
                     </span>
                  </h4>
                  
-                 {remainingAmount > 0 ? (
+                 {(remainingAmount > 0 || totalCost === 0) ? (
                     <div className="flex gap-2 mb-4">
                         <input 
                           type="number" 
@@ -586,13 +616,26 @@ const AccountantDashboard = () => {
                  )}
               </div>
 
-              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-3 sticky bottom-0 bg-white dark:bg-[#1e293b] pb-2">
-                <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-medium transition-colors cursor-pointer">Cancel</button>
-                <button type="submit" className={`flex-1 px-4 py-3 text-white rounded-xl font-bold transition-all shadow-lg cursor-pointer ${modalType === 'Sale' ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/20' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'}`}>
-                  {editingId ? 'Update' : 'Save'} {modalType} Record
-                </button>
-              </div>
-            </form>
+              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
+                 <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Remarks / Notes</label>
+                    <textarea value={formRemark} onChange={e => setFormRemark(e.target.value)} placeholder="Add any extra details, comments..." className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" rows={2}></textarea>
+                 </div>
+                 {modalType === 'Sale' && (
+                   <div>
+                      <label className="block text-xs font-semibold mb-1 text-pink-500">🎁 Gift Included (Optional)</label>
+                      <input type="text" value={formGift} onChange={e => setFormGift(e.target.value)} placeholder="E.g. Earphones, Back Case..." className="w-full bg-pink-50 dark:bg-pink-900/10 border border-pink-200 dark:border-pink-800 rounded-lg px-4 py-2 outline-none focus:border-pink-500" />
+                   </div>
+                 )}
+               </div>
+
+               <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-3 sticky bottom-0 bg-white dark:bg-[#1e293b] pb-2 mt-4 z-10">
+                 <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-medium transition-colors cursor-pointer">Cancel</button>
+                 <button type="submit" className={`flex-1 px-4 py-3 text-white rounded-xl font-bold transition-all shadow-lg cursor-pointer ${modalType === 'Sale' ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/20' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'}`}>
+                   {editingId ? 'Update' : 'Save'} {modalType} Record
+                 </button>
+               </div>
+             </form>
           </div>
         </div>
       )}
@@ -622,7 +665,7 @@ const AccountantDashboard = () => {
         </div>
 
         <nav className="flex-1 px-4 space-y-1 mt-2">
-          {['Dashboard', 'Sales', 'Purchases', 'Reports'].map((item) => (
+          {['Dashboard', 'Sales', 'Purchases', 'All Details'].map((item) => (
             <button
               key={item}
               onClick={() => setActiveTab(item)}
@@ -710,7 +753,7 @@ const AccountantDashboard = () => {
         {activeTab === 'Dashboard' ? (
           <>
             <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8 cursor-default">
-              {stats.map((stat) => (
+              {stats.cards.map((stat) => (
                 <div key={stat.label} className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
                   <div className="flex items-center justify-between mb-4">
                     <span className={`text-2xl w-12 h-12 flex items-center justify-center rounded-xl ${stat.bg}`}>
@@ -723,6 +766,56 @@ const AccountantDashboard = () => {
               ))}
             </section>
           </>
+        ) : null}
+
+        {activeTab === 'All Details' ? (
+          <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1 p-6 lg:p-10 animate-in fade-in duration-300">
+             <h2 className="text-2xl font-bold mb-6 border-b border-slate-100 dark:border-slate-800 pb-4 flex items-center gap-2">📊 Comprehensive Financial Summary</h2>
+             
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+                <div className="bg-slate-50 dark:bg-slate-900/50 p-6 rounded-xl border border-slate-200 dark:border-slate-700">
+                   <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Cash Flow (All Time)</h3>
+                   <div className="space-y-4">
+                      <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Total Credit (Cash In)</span>
+                         <span className="text-emerald-600 dark:text-emerald-400 font-bold text-xl font-mono">₹{stats.details.totalCredit.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Total Debit (Cash Out)</span>
+                         <span className="text-rose-600 dark:text-rose-400 font-bold text-xl font-mono">₹{stats.details.totalDebit.toLocaleString()}</span>
+                      </div>
+                   </div>
+                </div>
+
+                <div className="bg-slate-50 dark:bg-slate-900/50 p-6 rounded-xl border border-slate-200 dark:border-slate-700">
+                   <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Account Balances</h3>
+                   <div className="space-y-4">
+                      <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Opening Balance<br/><span className="text-[10px] uppercase text-slate-400">(Till Yesterday)</span></span>
+                         <span className="text-indigo-600 dark:text-indigo-400 font-bold text-xl font-mono">₹{stats.details.openingBalance.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between items-center bg-indigo-50 dark:bg-indigo-900/20 p-4 rounded-lg shadow-sm border border-indigo-200 dark:border-indigo-800">
+                         <span className="text-indigo-800 dark:text-indigo-300 font-bold text-sm">Closing Balance<br/><span className="text-[10px] uppercase.opacity-70">(Net Available)</span></span>
+                         <span className="text-indigo-700 dark:text-indigo-400 font-bold text-2xl font-mono tracking-tight">₹{stats.details.closingBalance.toLocaleString()}</span>
+                      </div>
+                   </div>
+                </div>
+             </div>
+
+             <div className="bg-indigo-50 dark:bg-indigo-900/20 p-6 rounded-xl border border-indigo-100 dark:border-indigo-800">
+                <h3 className="text-sm font-bold text-indigo-800 dark:text-indigo-400 uppercase tracking-wider mb-4">Profit & Loss Summary (All Time)</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                   <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm">
+                      <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Net Profit</span>
+                      <span className="text-emerald-500 font-bold text-xl font-mono">₹{stats.details.totalProfit.toLocaleString()}</span>
+                   </div>
+                   <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm">
+                      <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Net Loss</span>
+                      <span className="text-rose-500 font-bold text-xl font-mono">₹{stats.details.totalLoss.toLocaleString()}</span>
+                   </div>
+                </div>
+             </div>
+          </div>
         ) : null}
 
         {(activeTab === 'Dashboard' || activeTab === 'Sales' || activeTab === 'Purchases') && (
@@ -756,7 +849,7 @@ const AccountantDashboard = () => {
                       <tr key={tx.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors group">
                         <td className="px-6 py-4 align-top">
                           <div className="flex flex-col pt-1">
-                            <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">{tx.id}</span>
+                            <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">{tx.id.substring(0,8)}</span>
                             <span className="text-xs text-slate-500">{tx.date}</span>
                             <span className={`mt-2 text-[10px] w-max px-2 py-0.5 rounded font-bold uppercase tracking-tight ${tx.type === 'Sale' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-400' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400'}`}>
                               {tx.type}
@@ -779,6 +872,12 @@ const AccountantDashboard = () => {
                                  </div>
                                ))}
                              </div>
+                             {(tx.remark || tx.gift) && (
+                               <div className="mt-1 flex flex-col gap-1">
+                                 {tx.gift && <span className="text-xs text-pink-600 bg-pink-100 dark:bg-pink-900/30 px-2 py-1 rounded-md max-w-max">🎁 Gift: {tx.gift}</span>}
+                                 {tx.remark && <span className="text-xs italic text-slate-500 dark:text-slate-400">"{tx.remark}"</span>}
+                               </div>
+                             )}
                           </div>
                         </td>
                         <td className="px-6 py-4 align-top pt-5">
