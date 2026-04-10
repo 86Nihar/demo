@@ -1,80 +1,146 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { supabase } from '@/lib/supabase';
+import type { User } from '@supabase/supabase-js';
 
 interface PaymentRecord {
   mode: 'Cash' | 'UPI' | 'Credit Card' | 'Debit Card' | 'Netbanking' | 'Exchange';
   amount: number;
 }
 
+interface TransactionItem {
+  productName: string;
+  imeiNo: string;
+  purchasePrice: number;
+  sellingPrice: number; // 0 for purchases
+}
+
 interface TransactionRecord {
   id: string;
   type: 'Sale' | 'Purchase';
   partyName: string;
-  productName: string;
-  imeiNo: string;
   date: string;
-  purchasePrice: number;
-  sellingPrice: number; // 0 for purchases
+  
+  // Legacy fields
+  productName?: string;
+  imeiNo?: string;
+  purchasePrice?: number;
+  sellingPrice?: number;
+
+  // New multi-item 
+  items?: TransactionItem[];
+
   paymentRecords: PaymentRecord[];
   paymentStatus: 'Paid' | 'Partial' | 'Pending';
 }
 
-const initialTransactions: TransactionRecord[] = [];
+const getTxItems = (tx: TransactionRecord): TransactionItem[] => {
+  if (tx.items && tx.items.length > 0) return tx.items;
+  return [{
+    productName: tx.productName || '',
+    imeiNo: tx.imeiNo || '',
+    purchasePrice: tx.purchasePrice || 0,
+    sellingPrice: tx.sellingPrice || 0
+  }];
+};
+
+const getTxTotalPurchase = (tx: TransactionRecord) => getTxItems(tx).reduce((sum, item) => sum + item.purchasePrice, 0);
+const getTxTotalSelling = (tx: TransactionRecord) => getTxItems(tx).reduce((sum, item) => sum + item.sellingPrice, 0);
 
 const AccountantDashboard = () => {
   const [activeTab, setActiveTab] = useState('Dashboard');
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
-  // Load from local storage on mount
+  // Auth check on mount
   useEffect(() => {
-    const savedData = localStorage.getItem('ezy_transactions');
-    if (savedData) {
-      try {
-        const parsed = JSON.parse(savedData);
-        // Optional: filter out older than 24h if strictly requested, but it's safer to keep it and let user delete
-        // For a full 24-cycle, everything persists reliably now
-        setTransactions(parsed);
-      } catch (err) {
-        console.error("Error loading saved transactions", err);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        window.location.href = '/auth';
+      } else {
+        setUser(session.user);
+        setAuthLoading(false);
       }
-    }
-    setIsLoaded(true);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        window.location.href = '/auth';
+      } else {
+        setUser(session.user);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  // Sync to local storage
-  useEffect(() => {
-    if (isLoaded) {
-       localStorage.setItem('ezy_transactions', JSON.stringify(transactions));
+  // Load transactions from Supabase
+  const loadTransactions = useCallback(async () => {
+    if (!user) return;
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+    if (!error && data) {
+      const mapped: TransactionRecord[] = data.map((row: any) => ({
+        id: row.id,
+        type: row.type,
+        partyName: row.party_name,
+        date: row.date,
+        items: row.items,
+        paymentRecords: row.payment_records,
+        paymentStatus: row.payment_status,
+      }));
+      setTransactions(mapped);
     }
-  }, [transactions, isLoaded]);
+    setIsLoaded(true);
+  }, [user]);
+
+  useEffect(() => {
+    if (user) loadTransactions();
+  }, [user, loadTransactions]);
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    window.location.href = '/auth';
+  };
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalType, setModalType] = useState<'Sale' | 'Purchase'>('Sale');
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // Form State
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
   const [formPartyName, setFormPartyName] = useState('');
-  const [formProduct, setFormProduct] = useState('');
-  const [formImei, setFormImei] = useState('');
-  const [formPurchasePrice, setFormPurchasePrice] = useState<number | ''>('');
-  const [formSellingPrice, setFormSellingPrice] = useState<number | ''>('');
-  const [formPayments, setFormPayments] = useState<PaymentRecord[]>([]);
+  
+  const [formItems, setFormItems] = useState([{
+    productName: '',
+    imeiNo: '',
+    purchasePrice: '' as number | '',
+    sellingPrice: '' as number | ''
+  }]);
 
-  // Temp Payment Input
+  const [formPayments, setFormPayments] = useState<PaymentRecord[]>([]);
   const [payAmount, setPayAmount] = useState<number | ''>('');
   const [payMode, setPayMode] = useState<PaymentRecord['mode']>('Cash');
 
-  // Dynamic calculations for the Modal
-  const totalCost = modalType === 'Sale' ? Number(formSellingPrice || 0) : Number(formPurchasePrice || 0);
+  // Report Modal State
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportFilter, setReportFilter] = useState<'All'|'Today'|'SpecificDate'|'Month'>('All');
+  const [reportSpecificDate, setReportSpecificDate] = useState(new Date().toISOString().split('T')[0]);
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
+
+  const totalCost = formItems.reduce((sum, item) => {
+     return sum + (modalType === 'Sale' ? Number(item.sellingPrice || 0) : Number(item.purchasePrice || 0));
+  }, 0);
   const totalPaid = formPayments.reduce((sum, p) => sum + p.amount, 0);
   const remainingAmount = Math.max(0, totalCost - totalPaid);
 
-  // Auto-update the payment input box with the remaining amount automatically
   useEffect(() => {
     if (remainingAmount > 0) {
       setPayAmount(remainingAmount);
@@ -83,11 +149,25 @@ const AccountantDashboard = () => {
     }
   }, [remainingAmount, totalCost]);
 
+  const updateFormItem = (index: number, field: string, value: string | number) => {
+    const newItems = [...formItems];
+    newItems[index] = { ...newItems[index], [field]: value };
+    setFormItems(newItems);
+  };
+
+  const addFormItem = () => {
+    setFormItems([...formItems, { productName: '', imeiNo: '', purchasePrice: '', sellingPrice: '' }]);
+  };
+  
+  const removeFormItem = (index: number) => {
+    if (formItems.length > 1) {
+      setFormItems(formItems.filter((_, i) => i !== index));
+    }
+  };
+
   const addPayment = () => {
     if (payAmount && Number(payAmount) > 0) {
-      // Don't allow adding more than remaining if they overpay? Let's just add it.
       setFormPayments([...formPayments, { mode: payMode, amount: Number(payAmount) }]);
-      // payAmount will auto-update via useEffect based on new remainingAmount
     }
   };
 
@@ -95,46 +175,51 @@ const AccountantDashboard = () => {
     setFormPayments(formPayments.filter((_, i) => i !== index));
   };
 
-  const handleAddTransaction = (e: React.FormEvent) => {
+  const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Auto calculate payment status
-    const finalTotalPaid = formPayments.reduce((sum, p) => sum + p.amount, 0);
-    const finalTotalCost = modalType === 'Sale' ? Number(formSellingPrice) : Number(formPurchasePrice);
+    if (!user) return;
     
     let status: 'Paid' | 'Partial' | 'Pending' = 'Pending';
-    if (finalTotalPaid >= finalTotalCost && finalTotalCost > 0) status = 'Paid';
-    else if (finalTotalPaid > 0) status = 'Partial';
+    if (totalPaid >= totalCost && totalCost > 0) status = 'Paid';
+    else if (totalPaid > 0) status = 'Partial';
 
-    const txData: TransactionRecord = {
-      id: editingId || `TX${String(transactions.length + 1).padStart(3, '0')}`,
+    const mappedItems: TransactionItem[] = formItems.map(it => ({
+      productName: it.productName,
+      imeiNo: it.imeiNo,
+      purchasePrice: Number(it.purchasePrice) || 0,
+      sellingPrice: modalType === 'Sale' ? (Number(it.sellingPrice) || 0) : 0
+    }));
+
+    const txData: any = {
+      user_id: user.id,
       type: modalType,
-      partyName: formPartyName || 'General',
-      productName: formProduct,
-      imeiNo: formImei,
+      party_name: formPartyName,
       date: formDate,
-      purchasePrice: Number(formPurchasePrice) || 0,
-      sellingPrice: modalType === 'Sale' ? (Number(formSellingPrice) || 0) : 0,
-      paymentRecords: formPayments,
-      paymentStatus: status
+      items: mappedItems,
+      payment_records: formPayments,
+      payment_status: status
     };
 
     if (editingId) {
-      setTransactions(transactions.map(t => t.id === editingId ? txData : t));
-    } else {
-      setTransactions([txData, ...transactions]);
+      txData.id = editingId;
     }
-    
-    setIsModalOpen(false);
-    resetForm();
+
+    const { error } = await supabase
+      .from('transactions')
+      .upsert(txData);
+
+    if (error) {
+       alert("Error saving transaction: " + error.message);
+    } else {
+       loadTransactions();
+       setIsModalOpen(false);
+       resetForm();
+    }
   };
 
   const resetForm = () => {
     setFormPartyName('');
-    setFormProduct('');
-    setFormImei('');
-    setFormPurchasePrice('');
-    setFormSellingPrice('');
+    setFormItems([{ productName: '', imeiNo: '', purchasePrice: '', sellingPrice: '' }]);
     setFormPayments([]);
     setPayAmount('');
     setEditingId(null);
@@ -151,10 +236,15 @@ const AccountantDashboard = () => {
     setModalType(tx.type);
     setFormDate(tx.date);
     setFormPartyName(tx.partyName || '');
-    setFormProduct(tx.productName);
-    setFormImei(tx.imeiNo);
-    setFormPurchasePrice(tx.purchasePrice);
-    setFormSellingPrice(tx.sellingPrice);
+    
+    const itemsToEdit = getTxItems(tx).map(it => ({
+       productName: it.productName,
+       imeiNo: it.imeiNo,
+       purchasePrice: it.purchasePrice,
+       sellingPrice: it.sellingPrice
+    }));
+    setFormItems(itemsToEdit.length > 0 ? itemsToEdit : [{ productName: '', imeiNo: '', purchasePrice: '', sellingPrice: '' }]);
+    
     setFormPayments([...tx.paymentRecords]);
     setIsModalOpen(true);
   };
@@ -162,48 +252,64 @@ const AccountantDashboard = () => {
   const exportPDF = async () => {
     const doc = new jsPDF();
     
-    // Split data
-    const salesTx = transactions.filter(t => t.type === 'Sale');
-    const purchaseTx = transactions.filter(t => t.type === 'Purchase');
+    let filteredTx = [...transactions];
+    let reportTitleStr = "Full Financial Report";
 
-    // Overview Stats
+    if (reportFilter === 'Today') {
+      const today = new Date().toISOString().split('T')[0];
+      filteredTx = transactions.filter(t => t.date === today);
+      reportTitleStr = `Report: ${today}`;
+    } else if (reportFilter === 'SpecificDate') {
+      filteredTx = transactions.filter(t => t.date === reportSpecificDate);
+      reportTitleStr = `Report: ${reportSpecificDate}`;
+    } else if (reportFilter === 'Month') {
+      filteredTx = transactions.filter(t => t.date.startsWith(reportMonth));
+      reportTitleStr = `Monthly Report: ${reportMonth}`;
+    }
+    
+    const salesTx = filteredTx.filter(t => t.type === 'Sale');
+    const purchaseTx = filteredTx.filter(t => t.type === 'Purchase');
+
     let totalSales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0;
-    let todaySales = 0, todayPurchases = 0;
+    let todaySalesItemCount = 0, todayPurchasesItemCount = 0;
     const todayDate = new Date().toISOString().split('T')[0];
     
-    // Tracking Payments and Dues
     const salesPaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
     const purchasePaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
     const pendingSalesDues: {name: string, due: number}[] = [];
     const pendingPurchaseDues: {name: string, due: number}[] = [];
 
     salesTx.forEach(tx => {
-      totalSales += tx.sellingPrice;
-      const tProfit = tx.sellingPrice - tx.purchasePrice;
+      const txPur = getTxTotalPurchase(tx);
+      const txSell = getTxTotalSelling(tx);
+
+      totalSales += txSell;
+      const tProfit = txSell - txPur;
       if (tProfit > 0) totalProfit += tProfit;
       else if (tProfit < 0) totalLoss += Math.abs(tProfit);
-      if (tx.date === todayDate) todaySales++;
+      if (tx.date === todayDate) todaySalesItemCount += getTxItems(tx).length;
       
       let paid = 0;
       tx.paymentRecords.forEach(pr => {
           salesPaymentTotals[pr.mode] = (salesPaymentTotals[pr.mode] || 0) + pr.amount;
           paid += pr.amount;
       });
-      if (paid < tx.sellingPrice) pendingSalesDues.push({ name: tx.partyName, due: tx.sellingPrice - paid });
+      if (paid < txSell) pendingSalesDues.push({ name: tx.partyName, due: txSell - paid });
     });
 
     purchaseTx.forEach(tx => {
-      totalPurchases += tx.purchasePrice;
-      if (tx.date === todayDate) todayPurchases++;
+      const txPur = getTxTotalPurchase(tx);
+
+      totalPurchases += txPur;
+      if (tx.date === todayDate) todayPurchasesItemCount += getTxItems(tx).length;
       let paid = 0;
       tx.paymentRecords.forEach(pr => {
           purchasePaymentTotals[pr.mode] = (purchasePaymentTotals[pr.mode] || 0) + pr.amount;
           paid += pr.amount;
       });
-      if (paid < tx.purchasePrice) pendingPurchaseDues.push({ name: tx.partyName, due: tx.purchasePrice - paid });
+      if (paid < txPur) pendingPurchaseDues.push({ name: tx.partyName, due: txPur - paid });
     });
 
-    // Document Header & Logo
     try {
       const img = new window.Image();
       img.src = '/logo.png';
@@ -220,24 +326,24 @@ const AccountantDashboard = () => {
     }
 
     doc.setFontSize(11);
-    doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 14, 36);
-    doc.text(`Total Sales: Rs. ${totalSales}`, 14, 42);
-    doc.text(`Total Purchases: Rs. ${totalPurchases}`, 14, 48);
-    doc.text(`Total Profit: Rs. ${totalProfit}`, 14, 54);
-    doc.text(`Total Loss: Rs. ${totalLoss}`, 14, 60);
-    doc.text(`Items Sold Today: ${todaySales}`, 14, 66);
-    doc.text(`Items Purchased Today: ${todayPurchases}`, 14, 72);
+    doc.text(`Generated on: ${new Date().toLocaleDateString()}`, 14, 32);
+    doc.text(`Report Period: ${reportFilter === 'All' ? 'All Time' : reportTitleStr.replace('Report: ', '')}`, 14, 38);
+    doc.text(`Total Sales: Rs. ${totalSales}`, 14, 44);
+    doc.text(`Total Purchases: Rs. ${totalPurchases}`, 14, 50);
+    doc.text(`Total Generated Profit: Rs. ${totalProfit}`, 14, 56);
+    doc.text(`Total Loss: Rs. ${totalLoss}`, 14, 62);
+    doc.text(`Listed Sale Items: ${todaySalesItemCount}`, 14, 68);
+    doc.text(`Listed Purchase Items: ${todayPurchasesItemCount}`, 14, 74);
 
-    // Payment Breakdowns (Top Right)
     const rightX = 105;
     const rightX2 = 160;
     doc.setFont('helvetica', 'bold');
-    doc.text("Sales Pyts:", rightX, 36);
-    doc.text("Purchases Pyts:", rightX2, 36);
+    doc.text("Sales Pyts:", rightX, 38);
+    doc.text("Purchases Pyts:", rightX2, 38);
     doc.setFont('helvetica', 'normal');
     
-    let pyS = 42;
-    let pyP = 42;
+    let pyS = 44;
+    let pyP = 44;
     Object.entries(salesPaymentTotals).forEach(([mode, amount]) => {
       if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX, pyS); pyS += 6; }
     });
@@ -247,63 +353,53 @@ const AccountantDashboard = () => {
 
     let currentY = Math.max(pyS, pyP, 80) + 10;
 
-    // --- SALES SECTION ---
+    const formatPayments = (records: PaymentRecord[]) => records.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n');
+
     if (salesTx.length > 0) {
       doc.setFontSize(14);
       doc.text("Sales Ledger", 14, currentY);
       
-      const formatPayments = (records: PaymentRecord[]) => records.map(p => `${p.amount} ${p.mode}`).join(', ');
-      
-      const salesColumn = ["ID", "Date", "Customer / Product\n& IMEI", "Pur. Price", "Sell Price", "Payments", "Status"];
-      const salesRows = salesTx.map(tx => [
-        tx.id,
-        tx.date,
-        `[${tx.partyName}]\n${tx.productName}\n(${tx.imeiNo})`,
-        `Rs. ${tx.purchasePrice}`,
-        `Rs. ${tx.sellingPrice}`,
-        formatPayments(tx.paymentRecords),
-        tx.paymentStatus
-      ]);
-
-      autoTable(doc, {
-        head: [salesColumn],
-        body: salesRows,
-        startY: currentY + 4,
-        styles: { cellWidth: 'wrap', fontSize: 9 },
-        headStyles: { fillColor: [79, 70, 229] } // Indigo
+      const salesColumn = ["No.", "Date", "Customer & Items", "Pur. Price", "Sell Price", "Payments", "Status"];
+      const salesRows = salesTx.map(tx => {
+         const itemsStr = getTxItems(tx).map(it => `• ${it.productName} (${it.imeiNo})`).join('\n');
+         const partyStr = (tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-') ? `[${tx.partyName}]\n` : '';
+         return [
+           tx.id,
+           tx.date,
+           `${partyStr}${itemsStr}`,
+           `Rs. ${getTxTotalPurchase(tx)}`,
+           `Rs. ${getTxTotalSelling(tx)}`,
+           formatPayments(tx.paymentRecords),
+           tx.paymentStatus
+         ];
       });
-      
+
+      autoTable(doc, { head: [salesColumn], body: salesRows, startY: currentY + 4, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [79, 70, 229] } });
       currentY = (doc as any).lastAutoTable.finalY + 15;
     }
 
-    // --- PURCHASES SECTION ---
     if (purchaseTx.length > 0) {
       doc.setFontSize(14);
       doc.text("Purchases Ledger", 14, currentY);
-      
-      const formatPayments = (records: PaymentRecord[]) => records.map(p => `${p.amount} ${p.mode}`).join(', ');
 
-      const purColumn = ["ID", "Date", "Vendor / Product\n& IMEI", "Pur. Price", "Payments", "Status"];
-      const purRows = purchaseTx.map(tx => [
-        tx.id,
-        tx.date,
-        `[${tx.partyName}]\n${tx.productName}\n(${tx.imeiNo})`,
-        `Rs. ${tx.purchasePrice}`,
-        formatPayments(tx.paymentRecords),
-        tx.paymentStatus
-      ]);
-
-      autoTable(doc, {
-        head: [purColumn],
-        body: purRows,
-        startY: currentY + 4,
-        styles: { cellWidth: 'wrap', fontSize: 9 },
-        headStyles: { fillColor: [16, 185, 129] } // Emerald
+      const purColumn = ["No.", "Date", "Vendor & Items", "Pur. Price", "Payments", "Status"];
+      const purRows = purchaseTx.map(tx => {
+         const itemsStr = getTxItems(tx).map(it => `• ${it.productName} (${it.imeiNo})`).join('\n');
+         const partyStr = (tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-') ? `[${tx.partyName}]\n` : '';
+         return [
+           tx.id,
+           tx.date,
+           `${partyStr}${itemsStr}`,
+           `Rs. ${getTxTotalPurchase(tx)}`,
+           formatPayments(tx.paymentRecords),
+           tx.paymentStatus
+         ];
       });
+
+      autoTable(doc, { head: [purColumn], body: purRows, startY: currentY + 4, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [16, 185, 129] } });
       currentY = (doc as any).lastAutoTable.finalY + 15;
     }
 
-    // --- DUES SECTION ---
     if (pendingSalesDues.length > 0 || pendingPurchaseDues.length > 0) {
        doc.setFontSize(14);
        doc.text("Pending Dues Ledger", 14, currentY);
@@ -313,50 +409,50 @@ const AccountantDashboard = () => {
        pendingSalesDues.forEach(d => duesRows.push(["Sale (You will receive)", d.name, `Rs. ${d.due}`]));
        pendingPurchaseDues.forEach(d => duesRows.push(["Purchase (You owe)", d.name, `Rs. ${d.due}`]));
 
-       autoTable(doc, {
-         head: [duesCol],
-         body: duesRows,
-         startY: currentY + 4,
-         styles: { cellWidth: 'wrap', fontSize: 9 },
-         headStyles: { fillColor: [239, 68, 68] } // Red for warnings
-       });
+       autoTable(doc, { head: [duesCol], body: duesRows, startY: currentY + 4, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
        currentY = (doc as any).lastAutoTable.finalY + 15;
     }
 
     if (salesTx.length === 0 && purchaseTx.length === 0) {
       doc.setFontSize(12);
-      doc.text("No transactions found.", 14, currentY + 10);
+      doc.text("No transactions found for this period.", 14, currentY + 10);
     }
     
-    doc.save(`Store_Report_${new Date().toISOString().split('T')[0]}.pdf`);
+    setReportModalOpen(false);
+    doc.save(`Store_Report_${reportFilter === 'All' ? 'All_Time' : reportTitleStr.replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`);
   };
 
-  const deleteTx = (id: string) => {
-    setTransactions(transactions.filter(t => t.id !== id));
-  };
-
-  // Dashboard Stats Calculations
-  const stats = useMemo(() => {
-    let totalsales = 0;
-    let totalPurchases = 0;
-    let totalProfit = 0;
-    let totalLoss = 0;
-    let todaySalesCount = 0;
-    let todayPurchasesCount = 0;
+  const deleteTx = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this record?")) return;
+    const { error } = await supabase
+      .from('transactions')
+      .delete()
+      .eq('id', id);
     
+    if (error) {
+      alert("Error deleting transaction: " + error.message);
+    } else {
+      loadTransactions();
+    }
+  };
+
+  const stats = useMemo(() => {
+    let totalsales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0, todaySalesCount = 0, todayPurchasesCount = 0;
     const todayStr = new Date().toISOString().split('T')[0];
 
     transactions.forEach(tx => {
+      const txPur = getTxTotalPurchase(tx);
+      const txSell = getTxTotalSelling(tx);
+
       if (tx.type === 'Sale') {
-        totalsales += tx.sellingPrice;
-        const diff = tx.sellingPrice - tx.purchasePrice;
+        totalsales += txSell;
+        const diff = txSell - txPur;
         if (diff > 0) totalProfit += diff;
         else if (diff < 0) totalLoss += Math.abs(diff);
-        
-        if (tx.date === todayStr) todaySalesCount++;
+        if (tx.date === todayStr) todaySalesCount += getTxItems(tx).length;
       } else {
-        totalPurchases += tx.purchasePrice;
-        if (tx.date === todayStr) todayPurchasesCount++;
+        totalPurchases += txPur;
+        if (tx.date === todayStr) todayPurchasesCount += getTxItems(tx).length;
       }
     });
 
@@ -370,72 +466,77 @@ const AccountantDashboard = () => {
     ];
   }, [transactions]);
 
-  const salesList = transactions.filter(t => t.type === 'Sale');
-  const purchasesList = transactions.filter(t => t.type === 'Purchase');
-
-  const displayList = activeTab === 'Sales' ? salesList : 
-                      activeTab === 'Purchases' ? purchasesList : 
-                      transactions;
+  const displayList = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
+                      activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : transactions;
 
   return (
     <div className="flex min-h-screen bg-[#f8fafc] dark:bg-[#0f172a] text-slate-900 dark:text-slate-100 font-sans">
       
-      {/* Modal popup */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
-          <div className="bg-white dark:bg-[#1e293b] rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-700 my-8">
-            <div className={`p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center ${modalType === 'Sale' ? 'bg-indigo-50 dark:bg-indigo-900/20' : 'bg-emerald-50 dark:bg-emerald-900/20'}`}>
+          <div className="bg-white dark:bg-[#1e293b] rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-700 my-8 max-h-[90vh] flex flex-col">
+            <div className={`p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center shrink-0 ${modalType === 'Sale' ? 'bg-indigo-50 dark:bg-indigo-900/20' : 'bg-emerald-50 dark:bg-emerald-900/20'}`}>
               <h3 className="font-bold text-lg flex items-center gap-2">
                 {modalType === 'Sale' ? '🏷️' : '📦'} {editingId ? 'Edit' : 'New'} {modalType} Record
               </h3>
               <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer text-xl">✕</button>
             </div>
             
-            <form onSubmit={handleAddTransaction} className="p-6 space-y-6">
-              {/* Product Info Section */}
+            <form onSubmit={handleAddTransaction} className="p-6 overflow-y-auto flex-1 space-y-6">
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
+                <div>
+                  <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
+                  <input required type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                </div>
+                {remainingAmount > 0 && (
+                  <div className="animate-in fade-in zoom-in duration-300">
+                    <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : 'Vendor Name (Due)'}</label>
+                    <input type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
+                  </div>
+                )}
+              </div>
+
               <div>
-                <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider">Product Info</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
-                    <input required type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold mb-1 text-slate-500">Product Name</label>
-                    <input required type="text" value={formProduct} onChange={e => setFormProduct(e.target.value)} placeholder="e.g. iPhone 15 Pro" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
-                  </div>
-                  <div className={remainingAmount > 0 ? "" : "md:col-span-2"}>
-                    <label className="block text-xs font-semibold mb-1 text-slate-500">IMEI Number</label>
-                    <input required type="text" value={formImei} onChange={e => setFormImei(e.target.value)} placeholder="15-digit IMEI" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 tracking-widest font-mono" />
-                  </div>
-                  {remainingAmount > 0 && (
-                    <div className="animate-in fade-in zoom-in duration-300">
-                      <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : 'Vendor Name (Due)'}</label>
-                      <input required type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
+                <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
+                  Product Details
+                  <button type="button" onClick={addFormItem} className="text-xs bg-slate-100 dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 rounded hover:opacity-80 transition cursor-pointer">
+                    <span>+</span> Add Another Item
+                  </button>
+                </h4>
+
+                <div className="space-y-4">
+                  {formItems.map((item, idx) => (
+                    <div key={idx} className="bg-slate-50/50 dark:bg-slate-800/20 border border-slate-200 dark:border-slate-700 p-4 rounded-xl relative group">
+                      {formItems.length > 1 && (
+                         <button type="button" onClick={() => removeFormItem(idx)} className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center bg-rose-100 text-rose-600 rounded-full text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shadow">✕</button>
+                      )}
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-semibold mb-1 text-slate-500">Product Name</label>
+                          <input required type="text" value={item.productName} onChange={e => updateFormItem(idx, 'productName', e.target.value)} placeholder="e.g. iPhone 15 Pro" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold mb-1 text-slate-500">IMEI Number</label>
+                          <input required type="text" value={item.imeiNo} onChange={e => updateFormItem(idx, 'imeiNo', e.target.value)} placeholder="15-digit IMEI" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 tracking-widest font-mono" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold mb-1 text-slate-500">Purchase Price (₹)</label>
+                          <input required type="number" value={item.purchasePrice} onChange={e => updateFormItem(idx, 'purchasePrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
+                        </div>
+                        {modalType === 'Sale' && (
+                          <div>
+                            <label className="block text-xs font-semibold mb-1 text-slate-500">Selling Price (₹)</label>
+                            <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50/30 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
+                  ))}
                 </div>
               </div>
 
-              {/* Pricing Section */}
-              <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
-                <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider">Pricing (₹)</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-semibold mb-1 text-slate-500">Purchase Price</label>
-                    <input required type="number" value={formPurchasePrice} onChange={e => setFormPurchasePrice(Number(e.target.value))} placeholder="0.00" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
-                  </div>
-                  {modalType === 'Sale' && (
-                    <div>
-                      <label className="block text-xs font-semibold mb-1 text-slate-500">Selling Price</label>
-                      <input required type="number" value={formSellingPrice} onChange={e => setFormSellingPrice(Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
-                    </div>
-                  )}
-                </div>
-                {/* Profit is no longer shown individually individually here as per request */}
-              </div>
-
-              {/* Multi-Payment Section */}
               <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
                  <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
                     Payment Records
@@ -485,7 +586,7 @@ const AccountantDashboard = () => {
                  )}
               </div>
 
-              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-3">
+              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex gap-3 sticky bottom-0 bg-white dark:bg-[#1e293b] pb-2">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="flex-1 px-4 py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl font-medium transition-colors cursor-pointer">Cancel</button>
                 <button type="submit" className={`flex-1 px-4 py-3 text-white rounded-xl font-bold transition-all shadow-lg cursor-pointer ${modalType === 'Sale' ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/20' : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'}`}>
                   {editingId ? 'Update' : 'Save'} {modalType} Record
@@ -534,8 +635,62 @@ const AccountantDashboard = () => {
               <span>{item}</span>
             </button>
           ))}
+          <div className="pt-4 mt-4 border-t border-slate-100 dark:border-slate-800">
+            <button
+              onClick={handleSignOut}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-rose-50 dark:hover:bg-rose-900/10 text-rose-600 dark:text-rose-400 transition-all cursor-pointer font-medium"
+            >
+              <span>🚪 Sign Out</span>
+            </button>
+          </div>
         </nav>
       </aside>
+
+      {/* Report Modal */}
+      {reportModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-[#1e293b] rounded-2xl w-full max-w-sm shadow-2xl border border-slate-200 dark:border-slate-700">
+            <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+              <h3 className="font-bold text-lg">Generate Report</h3>
+              <button onClick={() => setReportModalOpen(false)} className="text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer">✕</button>
+            </div>
+            <div className="p-6 space-y-4">
+               <div>
+                  <label className="block text-xs font-semibold mb-2 text-slate-500">Report Period</label>
+                  <div className="grid grid-cols-2 gap-2 mb-4">
+                     {['All', 'Today', 'Month', 'SpecificDate'].map(mode => (
+                       <button 
+                         key={mode} 
+                         onClick={() => setReportFilter(mode as any)}
+                         className={`py-2 px-3 rounded-lg text-xs font-bold border transition ${reportFilter === mode ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-indigo-400'}`}
+                       >
+                         {mode === 'SpecificDate' ? 'Date' : mode}
+                       </button>
+                     ))}
+                  </div>
+               </div>
+
+               {reportFilter === 'SpecificDate' && (
+                 <div className="animate-in fade-in">
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Select Date</label>
+                    <input type="date" value={reportSpecificDate} onChange={e => setReportSpecificDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                 </div>
+               )}
+
+               {reportFilter === 'Month' && (
+                 <div className="animate-in fade-in">
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Select Month</label>
+                    <input type="month" value={reportMonth} onChange={e => setReportMonth(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                 </div>
+               )}
+
+               <button onClick={exportPDF} className="w-full py-3 bg-slate-900 dark:bg-indigo-600 hover:opacity-90 text-white rounded-xl font-bold transition shadow-lg mt-4 cursor-pointer">
+                 Download PDF Report
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col p-4 lg:p-8 max-w-[1400px] mx-auto w-full">
@@ -546,15 +701,14 @@ const AccountantDashboard = () => {
             <p className="text-slate-500 dark:text-slate-400">Inventory & Sales financial reports.</p>
           </div>
           <div className="flex items-center gap-4">
-            <button onClick={exportPDF} className="px-4 py-2 bg-white dark:bg-[#1e293b] border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 font-medium text-sm flex items-center gap-2 cursor-pointer transition-colors">
-              <span>📄</span> Export Full Report
+            <button onClick={() => setReportModalOpen(true)} className="px-4 py-2 bg-white dark:bg-[#1e293b] border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 font-medium text-sm flex items-center gap-2 cursor-pointer transition-colors">
+              <span>📄</span> Generate Report
             </button>
           </div>
         </header>
 
         {activeTab === 'Dashboard' ? (
           <>
-            {/* Stats Grid */}
             <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8 cursor-default">
               {stats.map((stat) => (
                 <div key={stat.label} className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
@@ -571,7 +725,6 @@ const AccountantDashboard = () => {
           </>
         ) : null}
 
-        {/* Transactions Table for Dashboard, Sales, or Purchases */}
         {(activeTab === 'Dashboard' || activeTab === 'Sales' || activeTab === 'Purchases') && (
           <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1">
             <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
@@ -584,8 +737,8 @@ const AccountantDashboard = () => {
               <table className="w-full text-left whitespace-nowrap">
                 <thead>
                   <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
-                    <th className="px-6 py-4">ID/Date</th>
-                    <th className="px-6 py-4">Product & IMEI</th>
+                    <th className="px-6 py-4">No./Date</th>
+                    <th className="px-6 py-4">Products & IMEI</th>
                     <th className="px-6 py-4">Financials</th>
                     <th className="px-6 py-4">Payments Breakdown</th>
                     <th className="px-6 py-4 text-right">Status/Action</th>
@@ -595,44 +748,54 @@ const AccountantDashboard = () => {
                   {displayList.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="py-12 text-center text-slate-500">
-                        No records found. Click "+ SALE" or "+ PURCHASE" to add one.
+                        No records found. Click &quot;+ SALE&quot; or &quot;+ PURCHASE&quot; to add one.
                       </td>
                     </tr>
                   ) : (
                     displayList.map((tx) => (
                       <tr key={tx.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors group">
-                        <td className="px-6 py-4">
-                          <div className="flex flex-col">
+                        <td className="px-6 py-4 align-top">
+                          <div className="flex flex-col pt-1">
                             <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">{tx.id}</span>
                             <span className="text-xs text-slate-500">{tx.date}</span>
-                            <span className={`mt-1 text-[10px] w-max px-2 py-0.5 rounded font-bold uppercase tracking-tight ${tx.type === 'Sale' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-400' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400'}`}>
+                            <span className={`mt-2 text-[10px] w-max px-2 py-0.5 rounded font-bold uppercase tracking-tight ${tx.type === 'Sale' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-400' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400'}`}>
                               {tx.type}
                             </span>
                           </div>
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="flex flex-col">
-                            <span className="font-bold text-xs text-slate-500 mb-0.5 uppercase">{tx.partyName}</span>
-                            <span className="font-semibold text-sm">{tx.productName}</span>
-                            <span className="text-xs font-mono text-slate-500 mt-0.5 bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded w-max border border-slate-200 dark:border-slate-700">IMEI: {tx.imeiNo}</span>
+                        <td className="px-6 py-4 align-top">
+                          <div className="flex flex-col gap-2">
+                             <div className="flex items-center gap-2">
+                               {tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-' && (
+                                 <span className="font-bold text-xs text-slate-500 uppercase">{tx.partyName}</span>
+                               )}
+                               <span className="bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] text-slate-500 lowercase font-medium border border-slate-200 dark:border-slate-700">{getTxItems(tx).length} item(s)</span>
+                             </div>
+                             <div className="flex flex-col gap-2 border-l-2 border-slate-200 dark:border-slate-700 pl-3 py-1">
+                               {getTxItems(tx).map((it, idx) => (
+                                 <div key={idx} className="flex flex-col whitespace-normal min-w-[200px]">
+                                   <span className="font-semibold text-sm leading-tight text-slate-800 dark:text-slate-200">{it.productName}</span>
+                                   <span className="text-[11px] font-mono text-slate-500 mt-0.5">IMEI: {it.imeiNo}</span>
+                                 </div>
+                               ))}
+                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="flex flex-col gap-1 text-xs">
+                        <td className="px-6 py-4 align-top pt-5">
+                          <div className="flex flex-col gap-1.5 text-xs">
                              <div className="flex justify-between w-32 border-b border-slate-100 dark:border-slate-800 pb-1">
                                <span className="text-slate-500">Pur. Price:</span>
-                               <span className="font-mono font-medium">₹{tx.purchasePrice}</span>
+                               <span className="font-mono font-medium">₹{getTxTotalPurchase(tx)}</span>
                              </div>
                              {tx.type === 'Sale' && (
                                <div className="flex justify-between w-32 pt-0.5">
                                  <span className="text-slate-500">Sell Price:</span>
-                                 <span className="font-mono font-medium text-emerald-600 dark:text-emerald-400">₹{tx.sellingPrice}</span>
+                                 <span className="font-mono font-medium text-emerald-600 dark:text-emerald-400">₹{getTxTotalSelling(tx)}</span>
                                </div>
                              )}
-                             {/* Removed individual profit calculation from the table as requested */}
                           </div>
                         </td>
-                        <td className="px-6 py-4">
+                        <td className="px-6 py-4 align-top pt-5">
                           <div className="flex flex-wrap gap-1 max-w-[200px]">
                             {tx.paymentRecords.length > 0 ? (
                               tx.paymentRecords.map((p, i) => (
@@ -646,7 +809,7 @@ const AccountantDashboard = () => {
                             )}
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-right">
+                        <td className="px-6 py-4 text-right align-top pt-5">
                           <div className="flex flex-col items-end gap-2">
                             <span className={`px-3 py-1 rounded flex items-center gap-1 text-[11px] font-bold uppercase tracking-tight shadow-sm ${
                               tx.paymentStatus === 'Paid' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30' : 
