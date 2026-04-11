@@ -20,7 +20,7 @@ interface TransactionItem {
 
 interface TransactionRecord {
   id: string;
-  type: 'Sale' | 'Purchase';
+  type: 'Sale' | 'Purchase' | 'Advance';
   partyName: string;
   date: string;
   
@@ -116,7 +116,7 @@ const AccountantDashboard = () => {
   };
 
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalType, setModalType] = useState<'Sale' | 'Purchase'>('Sale');
+  const [modalType, setModalType] = useState<'Sale' | 'Purchase' | 'Advance'>('Sale');
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
@@ -137,12 +137,18 @@ const AccountantDashboard = () => {
 
   // Report Modal State
   const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [reportFilter, setReportFilter] = useState<'All'|'Today'|'SpecificDate'|'Month'>('All');
+  const [reportType, setReportType] = useState<'SalesPurchases'|'AllDetails'>('SalesPurchases');
+  const [reportFilter, setReportFilter] = useState<'All'|'Today'|'Yesterday'|'SpecificDate'|'Month'>('All');
   const [reportSpecificDate, setReportSpecificDate] = useState(new Date().toISOString().split('T')[0]);
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
 
+  // Dashboard filter state
+  const [dashboardFilter, setDashboardFilter] = useState<'All'|'Today'|'Yesterday'|'SpecificDate'|'Month'>('All');
+  const [dashSpecificDate, setDashSpecificDate] = useState(new Date().toISOString().split('T')[0]);
+  const [dashMonth, setDashMonth] = useState(new Date().toISOString().slice(0, 7));
+
   const totalCost = formItems.reduce((sum, item) => {
-     return sum + (modalType === 'Sale' ? Number(item.sellingPrice || 0) : Number(item.purchasePrice || 0));
+     return sum + ((modalType === 'Sale' || modalType === 'Advance') ? Number(item.sellingPrice || 0) : Number(item.purchasePrice || 0));
   }, 0);
   const totalPaid = formPayments.reduce((sum, p) => sum + p.amount, 0);
   const remainingAmount = Math.max(0, totalCost - totalPaid);
@@ -235,7 +241,7 @@ const AccountantDashboard = () => {
     setEditingId(null);
   };
 
-  const openModal = (type: 'Sale' | 'Purchase') => {
+  const openModal = (type: 'Sale' | 'Purchase' | 'Advance') => {
     resetForm();
     setModalType(type);
     setIsModalOpen(true);
@@ -262,177 +268,205 @@ const AccountantDashboard = () => {
   };
 
   const exportPDF = async () => {
-    const doc = new jsPDF();
+    const doc = new jsPDF({ orientation: 'landscape', format: 'a4' });
+    const margin = { top: 19.1, bottom: 19.1, left: 6.4, right: 6.4 };
     
     let filteredTx = [...transactions];
-    let reportTitleStr = "Full Financial Report";
+    let reportTitleStr = reportType === 'AllDetails' ? "All Details Report" : "Basic Sale & Purchase Report";
 
     if (reportFilter === 'Today') {
       const today = new Date().toISOString().split('T')[0];
       filteredTx = transactions.filter(t => t.date === today);
-      reportTitleStr = `Report: ${today}`;
+      reportTitleStr += ` - ${today}`;
+    } else if (reportFilter === 'Yesterday') {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yStr = yesterday.toISOString().split('T')[0];
+      filteredTx = transactions.filter(t => t.date === yStr);
+      reportTitleStr += ` - ${yStr}`;
     } else if (reportFilter === 'SpecificDate') {
       filteredTx = transactions.filter(t => t.date === reportSpecificDate);
-      reportTitleStr = `Report: ${reportSpecificDate}`;
+      reportTitleStr += ` - ${reportSpecificDate}`;
     } else if (reportFilter === 'Month') {
       filteredTx = transactions.filter(t => t.date.startsWith(reportMonth));
-      reportTitleStr = `Monthly Report: ${reportMonth}`;
+      reportTitleStr += ` - ${reportMonth}`;
     }
-    
-    const salesTx = filteredTx.filter(t => t.type === 'Sale');
-    const purchaseTx = filteredTx.filter(t => t.type === 'Purchase');
-
-    let totalSales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0;
-    let reportSalesItemCount = 0, reportPurchasesItemCount = 0;
-    
-    const salesPaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
-    const purchasePaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
-    const pendingSalesDues: {name: string, due: number}[] = [];
-    const pendingPurchaseDues: {name: string, due: number}[] = [];
-
-    salesTx.forEach(tx => {
-      const txPur = getTxTotalPurchase(tx);
-      const txSell = getTxTotalSelling(tx);
-
-      totalSales += txSell;
-      const tProfit = txSell - txPur;
-      if (tProfit > 0) totalProfit += tProfit;
-      else if (tProfit < 0) totalLoss += Math.abs(tProfit);
-      reportSalesItemCount += getTxItems(tx).length;
-      
-      let paid = 0;
-      tx.paymentRecords.forEach(pr => {
-          salesPaymentTotals[pr.mode] = (salesPaymentTotals[pr.mode] || 0) + pr.amount;
-          paid += pr.amount;
-      });
-      if (paid < txSell) pendingSalesDues.push({ name: tx.partyName, due: txSell - paid });
-    });
-
-    purchaseTx.forEach(tx => {
-      const txPur = getTxTotalPurchase(tx);
-
-      totalPurchases += txPur;
-      reportPurchasesItemCount += getTxItems(tx).length;
-      let paid = 0;
-      tx.paymentRecords.forEach(pr => {
-          purchasePaymentTotals[pr.mode] = (purchasePaymentTotals[pr.mode] || 0) + pr.amount;
-          paid += pr.amount;
-      });
-      if (paid < txPur) pendingPurchaseDues.push({ name: tx.partyName, due: txPur - paid });
-    });
 
     try {
       const img = new window.Image();
       img.src = '/logo.png';
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-      });
-      doc.addImage(img, 'PNG', 14, 10, 20, 20);
+      await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+      doc.addImage(img, 'PNG', margin.left, margin.top - 10, 20, 20);
       doc.setFontSize(18);
-      doc.text("EZY BUY SELL STORE - Financial Report", 38, 22);
+      doc.text(`EZY BUY SELL STORE - ${reportTitleStr}`, margin.left + 25, margin.top + 2);
     } catch (e) {
       doc.setFontSize(18);
-      doc.text("EZY BUY SELL STORE - Financial Report", 14, 20);
+      doc.text(`EZY BUY SELL STORE - ${reportTitleStr}`, margin.left, margin.top);
     }
 
-    doc.setFontSize(11);
-    doc.text(`Report Period: ${reportFilter === 'All' ? 'All Time' : reportTitleStr.replace('Report: ', '')}`, 14, 32);
-    doc.text(`Total Sales: Rs. ${totalSales}`, 14, 38);
-    doc.text(`Total Purchases: Rs. ${totalPurchases}`, 14, 44);
-    doc.text(`Total Generated Profit: Rs. ${totalProfit}`, 14, 50);
-    doc.text(`Total Loss: Rs. ${totalLoss}`, 14, 56);
-    doc.text(`Listed Sale Items: ${reportSalesItemCount}`, 14, 62);
-    doc.text(`Listed Purchase Items: ${reportPurchasesItemCount}`, 14, 68);
+    let currentY = margin.top + 15;
 
-    const rightX = 105;
-    const rightX2 = 160;
-    doc.setFont('helvetica', 'bold');
-    doc.text("Sales Pyts:", rightX, 32);
-    doc.text("Purchases Pyts:", rightX2, 32);
-    doc.setFont('helvetica', 'normal');
-    
-    let pyS = 38;
-    let pyP = 38;
-    Object.entries(salesPaymentTotals).forEach(([mode, amount]) => {
-      if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX, pyS); pyS += 6; }
-    });
-    Object.entries(purchasePaymentTotals).forEach(([mode, amount]) => {
-      if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX2, pyP); pyP += 6; }
-    });
-
-    let currentY = Math.max(pyS, pyP, 80) + 10;
-
-    const formatPayments = (records: PaymentRecord[]) => records.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n');
-
-    if (salesTx.length > 0) {
-      doc.setFontSize(14);
-      doc.text("Sales Ledger", 14, currentY);
-      
-      const salesColumn = ["No.", "Date", "Customer & Items", "Pur. Price", "Sell Price", "Payments", "Status"];
-      const salesRows = salesTx.map((tx, idx) => {
-         const itemsStr = getTxItems(tx).map(it => `• ${it.productName} (${it.imeiNo})`).join('\n');
-         const partyStr = (tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-') ? `[${tx.partyName}]\n` : '';
-         const giftStr = tx.gift ? `\n[Gift: ${tx.gift}]` : '';
-         const remarkStr = tx.remark ? `\n(Note: ${tx.remark})` : '';
-         return [
-           idx + 1,
-           tx.date,
-           `${partyStr}${itemsStr}${giftStr}${remarkStr}`,
-           `Rs. ${getTxTotalPurchase(tx)}`,
-           `Rs. ${getTxTotalSelling(tx)}`,
-           formatPayments(tx.paymentRecords),
-           tx.paymentStatus
-         ];
-      });
-
-      autoTable(doc, { head: [salesColumn], body: salesRows, startY: currentY + 4, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [79, 70, 229] } });
-      currentY = (doc as any).lastAutoTable.finalY + 15;
-    }
-
-    if (purchaseTx.length > 0) {
-      doc.setFontSize(14);
-      doc.text("Purchases Ledger", 14, currentY);
-
-      const purColumn = ["No.", "Date", "Vendor & Items", "Pur. Price", "Payments", "Status"];
-      const purRows = purchaseTx.map((tx, idx) => {
-         const itemsStr = getTxItems(tx).map(it => `• ${it.productName} (${it.imeiNo})`).join('\n');
-         const partyStr = (tx.partyName && tx.partyName.toLowerCase() !== 'general' && tx.partyName !== '-') ? `[${tx.partyName}]\n` : '';
-         const remarkStr = tx.remark ? `\n(Note: ${tx.remark})` : '';
-         return [
-           idx + 1,
-           tx.date,
-           `${partyStr}${itemsStr}${remarkStr}`,
-           `Rs. ${getTxTotalPurchase(tx)}`,
-           formatPayments(tx.paymentRecords),
-           tx.paymentStatus
-         ];
-      });
-
-      autoTable(doc, { head: [purColumn], body: purRows, startY: currentY + 4, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [16, 185, 129] } });
-      currentY = (doc as any).lastAutoTable.finalY + 15;
-    }
-
-    if (pendingSalesDues.length > 0 || pendingPurchaseDues.length > 0) {
-       doc.setFontSize(14);
-       doc.text("Pending Dues Ledger", 14, currentY);
+    if (reportType === 'AllDetails') {
+       doc.setFontSize(11);
+       doc.text(`Total Active Products: ${parsedData.activeProducts.length}`, margin.left, currentY);
+       doc.text(`Total Stock Value: Rs. ${parsedData.totalProductStockPrice}`, margin.left, currentY + 6);
+       doc.text(`Opening Balance: Rs. ${parsedData.details.openingBalance}`, margin.left, currentY + 12);
+       doc.text(`Closing Balance: Rs. ${parsedData.details.closingBalance}`, margin.left, currentY + 18);
+       doc.text(`Total Income (Cash In): Rs. ${parsedData.details.filteredCashIn}`, margin.left, currentY + 24);
+       doc.text(`Total Expense (Cash Out): Rs. ${parsedData.details.filteredCashOut}`, margin.left, currentY + 30);
+       doc.text(`Total Generated Profit: Rs. ${parsedData.details.totalProfit}`, margin.left, currentY + 36);
        
-       const duesCol = ["Role", "Customer / Vendor Name", "Due Amount"];
-       const duesRows: any[] = [];
-       pendingSalesDues.forEach(d => duesRows.push(["Sale (You will receive)", d.name, `Rs. ${d.due}`]));
-       pendingPurchaseDues.forEach(d => duesRows.push(["Purchase (You owe)", d.name, `Rs. ${d.due}`]));
+       let rightX = 140;
+       doc.text(`Total Gifts Tracked:`, rightX, currentY);
+       let gY = currentY + 6;
+       parsedData.gifts.forEach(([name, counts]) => {
+           doc.text(`- ${name}: ${counts.out} Given`, rightX, gY);
+           gY += 6;
+       });
+       
+       currentY = Math.max(currentY + 42, gY) + 10;
+       
+       const advTx = filteredTx.filter(t => t.type === 'Advance');
+       if (advTx.length > 0) {
+          doc.setFontSize(14);
+          doc.text("Advances Ledger", margin.left, currentY);
+          const advHeaders = ["Date", "Customer Info", "Model & IMEI", "Advance Amount", "Payments"];
+          const advRows = advTx.map((tx) => {
+             const custInfo = `${tx.partyName || ''}\n${tx.remark || ''}`;
+             const itemInfo = getTxItems(tx).map(it => `${it.productName}\nIMEI: ${it.imeiNo}`).join('\n\n');
+             const advAmt = getTxTotalSelling(tx);
+             return [tx.date, custInfo, itemInfo, `Rs. ${advAmt}`, tx.paymentRecords.map(p => `${p.mode}: Rs. ${p.amount}`).join('\n')];
+          });
+          autoTable(doc, { head: [advHeaders], body: advRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [245, 158, 11] } });
+       }
 
-       autoTable(doc, { head: [duesCol], body: duesRows, startY: currentY + 4, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
-       currentY = (doc as any).lastAutoTable.finalY + 15;
-    }
+    } else {
+       const salesTx = filteredTx.filter(t => t.type === 'Sale');
+       const purchaseTx = filteredTx.filter(t => t.type === 'Purchase');
 
-    if (salesTx.length === 0 && purchaseTx.length === 0) {
-      doc.setFontSize(12);
-      doc.text("No transactions found for this period.", 14, currentY + 10);
+       let totalSales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0;
+       let reportSalesItemCount = 0, reportPurchasesItemCount = 0;
+       
+       const salesPaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
+       const purchasePaymentTotals: Record<string, number> = { Cash: 0, UPI: 0, 'Credit Card': 0, 'Debit Card': 0, Netbanking: 0, Exchange: 0 };
+       const pendingSalesDues: {name: string, due: number}[] = [];
+       const pendingPurchaseDues: {name: string, due: number}[] = [];
+
+       salesTx.forEach(tx => {
+         const txPur = getTxTotalPurchase(tx);
+         const txSell = getTxTotalSelling(tx);
+         totalSales += txSell;
+         const tProfit = txSell - txPur;
+         if (tProfit > 0) totalProfit += tProfit; else if (tProfit < 0) totalLoss += Math.abs(tProfit);
+         reportSalesItemCount += getTxItems(tx).length;
+         
+         let paid = 0;
+         tx.paymentRecords.forEach(pr => { 
+            salesPaymentTotals[pr.mode] = (salesPaymentTotals[pr.mode] || 0) + pr.amount;
+            paid += pr.amount;
+         });
+         if (paid < txSell) pendingSalesDues.push({ name: tx.partyName, due: txSell - paid });
+       });
+
+       purchaseTx.forEach(tx => {
+         const txPur = getTxTotalPurchase(tx);
+         totalPurchases += txPur;
+         reportPurchasesItemCount += getTxItems(tx).length;
+         
+         let paid = 0;
+         tx.paymentRecords.forEach(pr => { 
+            purchasePaymentTotals[pr.mode] = (purchasePaymentTotals[pr.mode] || 0) + pr.amount;
+            paid += pr.amount;
+         });
+         if (paid < txPur) pendingPurchaseDues.push({ name: tx.partyName, due: txPur - paid });
+       });
+
+       doc.setFontSize(11);
+       doc.text(`Report Period: ${reportFilter === 'All' ? 'All Time' : reportTitleStr.replace('Basic Sale & Purchase Report - ', '')}`, margin.left, currentY);
+       doc.text(`Total Sales: Rs. ${totalSales}`, margin.left, currentY + 6);
+       doc.text(`Total Purchases: Rs. ${totalPurchases}`, margin.left, currentY + 12);
+       doc.text(`Total Generated Profit: Rs. ${totalProfit}`, margin.left, currentY + 18);
+       doc.text(`Total Loss: Rs. ${totalLoss}`, margin.left, currentY + 24);
+       doc.text(`Listed Sale Items: ${reportSalesItemCount}`, margin.left, currentY + 30);
+       doc.text(`Listed Purchase Items: ${reportPurchasesItemCount}`, margin.left, currentY + 36);
+
+       const rightX = 110;
+       const rightX2 = 180;
+       doc.setFont('helvetica', 'bold');
+       doc.text("Sales Pyts:", rightX, currentY);
+       doc.text("Purchases Pyts:", rightX2, currentY);
+       doc.setFont('helvetica', 'normal');
+       
+       let pyS = currentY + 6;
+       let pyP = currentY + 6;
+       Object.entries(salesPaymentTotals).forEach(([mode, amount]) => {
+         if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX, pyS); pyS += 6; }
+       });
+       Object.entries(purchasePaymentTotals).forEach(([mode, amount]) => {
+         if (amount > 0) { doc.text(`${mode}: Rs. ${amount}`, rightX2, pyP); pyP += 6; }
+       });
+
+       currentY = Math.max(currentY + 42, pyS, pyP) + 12;
+
+       if (salesTx.length > 0) {
+         doc.setFontSize(14);
+         doc.text("Sales Ledger", margin.left, currentY);
+         const sHeaders = ["No.", "Date", "Customer & Item", "Sell Price", "Profit", "Payments", "Status"];
+         const sRows = salesTx.map((tx, idx) => {
+             const custItem = getTxItems(tx).map(it => {
+                 let res = tx.partyName && tx.partyName !== '-' ? `${tx.partyName}\n` : '';
+                 res += `${it.productName}\nIMEI-${it.imeiNo}`;
+                 if (tx.gift) res += `\nGift: ${tx.gift}`;
+                 if (tx.remark) res += `\nMsg: ${tx.remark}`;
+                 return res;
+             }).join('\n\n');
+             const purPrice = getTxTotalPurchase(tx);
+             const sellPrice = getTxTotalSelling(tx);
+             return [
+                 idx + 1, tx.date, custItem, `Rs. ${sellPrice}`, `Rs. ${sellPrice - purPrice}`, 
+                 tx.paymentRecords.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n'), tx.paymentStatus
+             ];
+         });
+         autoTable(doc, { head: [sHeaders], body: sRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9, minCellHeight: 15, valign: 'top' }, headStyles: { fillColor: [79, 70, 229] } });
+         currentY = (doc as any).lastAutoTable.finalY + 15;
+       }
+
+       if (purchaseTx.length > 0) {
+         doc.setFontSize(14);
+         doc.text("Purchases Ledger", margin.left, currentY);
+         const pHeaders = ["No.", "Date", "Vendor & Item", "Pur. Price", "Payments", "Status"];
+         const pRows = purchaseTx.map((tx, idx) => {
+             const custItem = getTxItems(tx).map(it => {
+                 let res = tx.partyName && tx.partyName !== '-' ? `${tx.partyName}\n` : '';
+                 res += `${it.productName}\nIMEI-${it.imeiNo}`;
+                 if (tx.remark) res += `\nMsg: ${tx.remark}`;
+                 return res;
+             }).join('\n\n');
+             return [
+                 idx + 1, tx.date, custItem, `Rs. ${getTxTotalPurchase(tx)}`, 
+                 tx.paymentRecords.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n'), tx.paymentStatus
+             ];
+         });
+         autoTable(doc, { head: [pHeaders], body: pRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9, minCellHeight: 15, valign: 'top' }, headStyles: { fillColor: [16, 185, 129] } });
+         currentY = (doc as any).lastAutoTable.finalY + 15;
+       }
+
+       if (pendingSalesDues.length > 0 || pendingPurchaseDues.length > 0) {
+          doc.setFontSize(14);
+          doc.text("Pending Dues Ledger", margin.left, currentY);
+          
+          const duesCol = ["Role", "Customer / Vendor Name", "Due Amount"];
+          const duesRows: any[] = [];
+          pendingSalesDues.forEach(d => duesRows.push(["Sale (Receive)", d.name, `Rs. ${d.due}`]));
+          pendingPurchaseDues.forEach(d => duesRows.push(["Purchase (Given)", d.name, `Rs. ${d.due}`]));
+
+          autoTable(doc, { head: [duesCol], body: duesRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
+          currentY = (doc as any).lastAutoTable.finalY + 15;
+       }
     }
     
     setReportModalOpen(false);
-    doc.save(`Store_Report_${reportFilter === 'All' ? 'All_Time' : reportTitleStr.replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`);
+    doc.save(`Store_Report_${reportType}_${reportFilter === 'All' ? 'All_Time' : reportTitleStr.replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`);
   };
 
   const deleteTx = async (id: string) => {
@@ -449,54 +483,155 @@ const AccountantDashboard = () => {
     }
   };
 
-  const stats = useMemo(() => {
+  const parsedData = useMemo(() => {
     let totalsales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0, todaySalesCount = 0, todayPurchasesCount = 0;
     let totalDebit = 0, totalCredit = 0, openingCredit = 0, openingDebit = 0;
-    const todayStr = new Date().toISOString().split('T')[0];
+    let filteredCashIn = 0, filteredCashOut = 0;
 
-    transactions.forEach(tx => {
-      const txPur = getTxTotalPurchase(tx);
-      const txSell = getTxTotalSelling(tx);
-      const isToday = tx.date === todayStr;
-      
-      let txPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
+    const inventoryTracker = new Map<string, any>(); 
+    const giftTracker = new Map<string, {in: number, out: number}>();
+    const modelTracker = new Map<string, number>();
+    const advancesMap = new Map<string, TransactionRecord>();
 
-      if (tx.type === 'Sale') {
-        totalsales += txSell;
-        totalCredit += txPaid;
-        if (!isToday && tx.date < todayStr) openingCredit += txPaid;
-
-        const diff = txSell - txPur;
-        if (diff > 0) totalProfit += diff;
-        else if (diff < 0) totalLoss += Math.abs(diff);
-        if (isToday) todaySalesCount += getTxItems(tx).length;
-      } else {
-        totalPurchases += txPur;
-        totalDebit += txPaid;
-        if (!isToday && tx.date < todayStr) openingDebit += txPaid;
-
-        if (isToday) todayPurchasesCount += getTxItems(tx).length;
+    const sortedTx = [...transactions].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    
+    // Pass 1: find advances
+    sortedTx.forEach(tx => {
+      if (tx.type === 'Advance') {
+        advancesMap.set(tx.id, tx);
       }
     });
 
+    const isFilterMatch = (d: string) => {
+        if (dashboardFilter === 'Today') return d === new Date().toISOString().split('T')[0];
+        if (dashboardFilter === 'Yesterday') {
+           const yesterday = new Date();
+           yesterday.setDate(yesterday.getDate() - 1);
+           return d === yesterday.toISOString().split('T')[0];
+        }
+        if (dashboardFilter === 'SpecificDate') return d === dashSpecificDate;
+        if (dashboardFilter === 'Month') return d.startsWith(dashMonth);
+        return true;
+    };
+    
+    const isBeforeFilter = (d: string) => {
+        if (dashboardFilter === 'Today') return d < new Date().toISOString().split('T')[0];
+        if (dashboardFilter === 'Yesterday') {
+           const yesterday = new Date();
+           yesterday.setDate(yesterday.getDate() - 1);
+           return d < yesterday.toISOString().split('T')[0];
+        }
+        if (dashboardFilter === 'SpecificDate') return d < dashSpecificDate;
+        if (dashboardFilter === 'Month') return d < dashMonth;
+        return false;
+    };
+
+    sortedTx.forEach(tx => {
+      const txPur = getTxTotalPurchase(tx);
+      const txSell = getTxTotalSelling(tx);
+      const isToday = tx.date === new Date().toISOString().split('T')[0];
+      let txPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
+      let txCashPaid = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
+
+      const isMatch = isFilterMatch(tx.date);
+      const isBefore = isBeforeFilter(tx.date);
+
+      if (tx.type === 'Purchase') {
+        getTxItems(tx).forEach(it => {
+            inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE' });
+        });
+        if (isMatch) {
+            totalPurchases += txPur;
+            totalDebit += txPaid;
+            filteredCashOut += txCashPaid;
+            if (isToday) todayPurchasesCount += getTxItems(tx).length;
+        }
+        if (isBefore) openingDebit += txPaid;
+      } else if (tx.type === 'Sale') {
+        getTxItems(tx).forEach(it => {
+            inventoryTracker.set(it.imeiNo, { ...it, status: 'INACTIVE', soldDate: tx.date });
+            // Fulfill advance
+            for (const [advId, advTx] of advancesMap.entries()) {
+               if (getTxItems(advTx).some(advIt => advIt.imeiNo === it.imeiNo)) {
+                  advancesMap.delete(advId);
+                  break;
+               }
+            }
+        });
+        if (isMatch) {
+            totalsales += txSell;
+            totalCredit += txPaid;
+            filteredCashIn += txCashPaid;
+            const diff = txSell - txPur;
+            if (diff > 0) totalProfit += diff; else if (diff < 0) totalLoss += Math.abs(diff);
+            if (isToday) todaySalesCount += getTxItems(tx).length;
+            
+            getTxItems(tx).forEach(it => {
+               modelTracker.set(it.productName, (modelTracker.get(it.productName) || 0) + 1);
+            });
+            
+            if (tx.gift) {
+               const g = giftTracker.get(tx.gift) || {in: 0, out: 0};
+               g.out += 1;
+               giftTracker.set(tx.gift, g);
+            }
+        }
+        if (isBefore) openingCredit += txPaid;
+      }
+      // Note: Advance financials are excluded from this loop to prevent double counting 
+      // when they are converted to Sales. Only unfulfilled advances will be added later.
+    });
+
+    // Add financials ONLY for Unfulfilled Advances
+    Array.from(advancesMap.values()).forEach(advTx => {
+       const isMatch = isFilterMatch(advTx.date);
+       const isBefore = isBeforeFilter(advTx.date);
+       let advPaid = advTx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
+       let advCashPaid = advTx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
+       if (isMatch) {
+           totalCredit += advPaid;
+           filteredCashIn += advCashPaid;
+       }
+       if (isBefore) openingCredit += advPaid;
+    });
+
+    const activeProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'ACTIVE');
+    const totalProductStockPrice = activeProducts.reduce((sum, p) => sum + p.purchasePrice, 0);
     const openingBalance = openingCredit - openingDebit;
-    const closingBalance = totalCredit - totalDebit;
+    const closingBalance = openingBalance + (totalCredit - totalDebit);
 
     return {
       cards: [
-        { label: 'Total Sales Revenue', value: `₹${totalsales.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
-        { label: 'Total Purchases Expense', value: `₹${totalPurchases.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
-        { label: 'Total Profit', value: `₹${totalProfit.toLocaleString()}`, icon: '🚀', color: 'text-indigo-500', bg: 'bg-indigo-50 dark:bg-indigo-900/20' },
-        { label: 'Total Loss', value: `₹${totalLoss.toLocaleString()}`, icon: '📉', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
-        { label: 'Items Sold Today', value: todaySalesCount.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
-        { label: 'Purchased Today', value: todayPurchasesCount.toString(), icon: '🛒', color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-900/20' },
+        { label: 'Total Sales (Filtered)', value: `₹${totalsales.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Total Purchases (Filtered)', value: `₹${totalPurchases.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
+        { label: 'Net Cash In Hand', value: `₹${(filteredCashIn - filteredCashOut).toLocaleString()}`, icon: '💵', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Cash IN (Filtered)', value: `₹${filteredCashIn.toLocaleString()}`, icon: '⬇️', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Cash OUT (Filtered)', value: `₹${filteredCashOut.toLocaleString()}`, icon: '⬆️', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
+        { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
       ],
-      details: { totalDebit, totalCredit, openingBalance, closingBalance, totalProfit, totalLoss }
+      details: { totalDebit, totalCredit, openingBalance, closingBalance, totalProfit, totalLoss, filteredCashIn, filteredCashOut },
+      activeProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries())
     };
-  }, [transactions]);
+  }, [transactions, dashboardFilter, dashSpecificDate, dashMonth]);
 
-  const displayList = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
-                      activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : transactions;
+  const stats = parsedData.stats || { cards: parsedData.cards, details: parsedData.details };
+  const displayList = useMemo(() => {
+     let list = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
+                activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : 
+                activeTab === 'Advances' ? parsedData.activeAdvances : transactions;
+     
+     return list.filter(t => {
+        if (dashboardFilter === 'Today') return t.date === new Date().toISOString().split('T')[0];
+        if (dashboardFilter === 'Yesterday') {
+           const yesterday = new Date();
+           yesterday.setDate(yesterday.getDate() - 1);
+           return t.date === yesterday.toISOString().split('T')[0];
+        }
+        if (dashboardFilter === 'SpecificDate') return t.date === dashSpecificDate;
+        if (dashboardFilter === 'Month') return t.date.startsWith(dashMonth);
+        return true;
+     });
+  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances]);
 
 
   return (
@@ -521,8 +656,8 @@ const AccountantDashboard = () => {
                 </div>
                 {remainingAmount > 0 && (
                   <div className="animate-in fade-in zoom-in duration-300">
-                    <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : 'Vendor Name (Due)'}</label>
-                    <input type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
+                     <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : modalType === 'Advance' ? 'Customer Name' : 'Vendor Name (Due)'}</label>
+                     <input type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Advance' || modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
                   </div>
                 )}
               </div>
@@ -559,6 +694,12 @@ const AccountantDashboard = () => {
                           <div>
                             <label className="block text-xs font-semibold mb-1 text-slate-500">Selling Price (₹)</label>
                             <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50/30 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
+                          </div>
+                        )}
+                        {modalType === 'Advance' && (
+                          <div>
+                            <label className="block text-xs font-semibold mb-1 text-slate-500">Advance Amount (₹)</label>
+                            <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-amber-50/30 border border-amber-200 rounded-lg px-4 py-2 outline-none focus:border-amber-500 font-mono" />
                           </div>
                         )}
                       </div>
@@ -618,8 +759,8 @@ const AccountantDashboard = () => {
 
               <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
                  <div>
-                    <label className="block text-xs font-semibold mb-1 text-slate-500">Remarks / Notes</label>
-                    <textarea value={formRemark} onChange={e => setFormRemark(e.target.value)} placeholder="Add any extra details, comments..." className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" rows={2}></textarea>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">{modalType === 'Advance' ? 'Address / Contact details' : 'Remarks / Notes'}</label>
+                    <textarea value={formRemark} onChange={e => setFormRemark(e.target.value)} placeholder="Add any extra details, comments, address..." className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" rows={2}></textarea>
                  </div>
                  {modalType === 'Sale' && (
                    <div>
@@ -655,17 +796,22 @@ const AccountantDashboard = () => {
           </div>
         </div>
         
-        <div className="p-4 flex gap-2">
-           <button onClick={() => openModal('Sale')} className="flex-1 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg transition-colors cursor-pointer text-center">
-             + SALE
-           </button>
-           <button onClick={() => openModal('Purchase')} className="flex-1 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded-lg transition-colors cursor-pointer text-center">
-             + PURCHASE
+        <div className="p-4 flex flex-col gap-2">
+           <div className="flex gap-2">
+             <button onClick={() => openModal('Sale')} className="flex-1 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+               + SALE
+             </button>
+             <button onClick={() => openModal('Purchase')} className="flex-1 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+               + PURCHASE
+             </button>
+           </div>
+           <button onClick={() => openModal('Advance')} className="w-full text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+             ⭐ + ADVANCE
            </button>
         </div>
 
         <nav className="flex-1 px-4 space-y-1 mt-2">
-          {['Dashboard', 'Sales', 'Purchases', 'All Details'].map((item) => (
+          {['Dashboard', 'Sales', 'Purchases', 'Advances', 'All Details'].map((item) => (
             <button
               key={item}
               onClick={() => setActiveTab(item)}
@@ -699,9 +845,17 @@ const AccountantDashboard = () => {
             </div>
             <div className="p-6 space-y-4">
                <div>
+                  <label className="block text-xs font-semibold mb-2 text-slate-500">Report Type</label>
+                  <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg mb-4 text-xs font-bold">
+                     <button onClick={() => setReportType('SalesPurchases')} className={`flex-1 py-2 rounded-md transition ${reportType === 'SalesPurchases' ? 'bg-white dark:bg-slate-700 shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-slate-500'}`}>Sales & Purchases</button>
+                     <button onClick={() => setReportType('AllDetails')} className={`flex-1 py-2 rounded-md transition ${reportType === 'AllDetails' ? 'bg-white dark:bg-slate-700 shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-slate-500'}`}>All Details</button>
+                  </div>
+               </div>
+
+               <div>
                   <label className="block text-xs font-semibold mb-2 text-slate-500">Report Period</label>
                   <div className="grid grid-cols-2 gap-2 mb-4">
-                     {['All', 'Today', 'Month', 'SpecificDate'].map(mode => (
+                     {['All', 'Today', 'Yesterday', 'Month', 'SpecificDate'].map(mode => (
                        <button 
                          key={mode} 
                          onClick={() => setReportFilter(mode as any)}
@@ -738,13 +892,31 @@ const AccountantDashboard = () => {
       {/* Main Content */}
       <main className="flex-1 flex flex-col p-4 lg:p-8 max-w-[1400px] mx-auto w-full">
         {/* Header */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8 border-b border-slate-200 dark:border-slate-800 pb-4">
           <div>
             <h1 className="text-2xl font-bold">{activeTab} Overview</h1>
-            <p className="text-slate-500 dark:text-slate-400">Inventory & Sales financial reports.</p>
+            <p className="text-slate-500 dark:text-slate-400">Inventory, Advances & Sales financial reports.</p>
           </div>
-          <div className="flex items-center gap-4">
-            <button onClick={() => setReportModalOpen(true)} className="px-4 py-2 bg-white dark:bg-[#1e293b] border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 font-medium text-sm flex items-center gap-2 cursor-pointer transition-colors">
+          
+          <div className="flex flex-col md:flex-row items-center gap-4 bg-white dark:bg-slate-800 p-2 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700">
+              <div className="flex items-center gap-2 px-2 border-r border-slate-200 dark:border-slate-700">
+                <span className="text-xs font-bold text-slate-400">FILTER:</span>
+                <select value={dashboardFilter} onChange={e => setDashboardFilter(e.target.value as any)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none">
+                  <option value="All">All Time</option>
+                  <option value="Today">Today</option>
+                  <option value="Yesterday">Yesterday</option>
+                  <option value="Month">This Month</option>
+                  <option value="SpecificDate">Specific Date</option>
+                </select>
+                {dashboardFilter === 'SpecificDate' && (
+                  <input type="date" value={dashSpecificDate} onChange={e => setDashSpecificDate(e.target.value)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none" />
+                )}
+                {dashboardFilter === 'Month' && (
+                  <input type="month" value={dashMonth} onChange={e => setDashMonth(e.target.value)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none" />
+                )}
+              </div>
+            
+            <button onClick={() => setReportModalOpen(true)} className="px-4 py-2 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 font-bold rounded-lg hover:bg-indigo-100 cursor-pointer transition-colors flex items-center gap-2">
               <span>📄</span> Generate Report
             </button>
           </div>
@@ -815,10 +987,58 @@ const AccountantDashboard = () => {
                    </div>
                 </div>
              </div>
+
+             <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mt-8">
+                <div className="bg-blue-50 dark:bg-blue-900/20 p-6 rounded-xl border border-blue-100 dark:border-blue-800">
+                   <h3 className="text-sm font-bold text-blue-800 dark:text-blue-400 uppercase tracking-wider mb-4">Inventory Overview</h3>
+                   <div className="space-y-4">
+                      <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                         <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Total Active Products</span>
+                         <span className="font-bold text-xl">{parsedData.activeProducts.length}</span>
+                      </div>
+                      <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                         <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Total Stock Value</span>
+                         <span className="font-bold text-xl font-mono text-blue-600 dark:text-blue-400">₹{parsedData.totalProductStockPrice.toLocaleString()}</span>
+                      </div>
+                   </div>
+                </div>
+
+                <div className="bg-pink-50 dark:bg-pink-900/20 p-6 rounded-xl border border-pink-100 dark:border-pink-800">
+                   <h3 className="text-sm font-bold text-pink-800 dark:text-pink-400 uppercase tracking-wider mb-4">Gifts Tracked (Filtered)</h3>
+                   {parsedData.gifts.length === 0 ? (
+                     <div className="text-sm text-slate-500 italic p-4">No gifts recorded yet.</div>
+                   ) : (
+                     <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+                        {parsedData.gifts.map(([name, counts], idx) => (
+                           <div key={idx} className="flex justify-between items-center bg-white dark:bg-slate-800 p-3 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                              <span className="font-medium text-sm text-slate-700 dark:text-slate-200">{name}</span>
+                              <span className="text-pink-600 font-bold bg-pink-100 dark:bg-pink-900/40 px-2 py-1 rounded text-xs">{counts.out} Given</span>
+                           </div>
+                        ))}
+                     </div>
+                   )}
+                </div>
+
+                <div className="bg-purple-50 dark:bg-purple-900/20 p-6 rounded-xl border border-purple-100 dark:border-purple-800">
+                   <h3 className="text-sm font-bold text-purple-800 dark:text-purple-400 uppercase tracking-wider mb-4">Models Sold (Filtered)</h3>
+                   {parsedData.modelsSold.length === 0 ? (
+                     <div className="text-sm text-slate-500 italic p-4">No models sold in this filter.</div>
+                   ) : (
+                     <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+                        {parsedData.modelsSold.sort((a,b) => b[1] - a[1]).map(([name, count], idx) => (
+                           <div key={idx} className="flex justify-between items-center bg-white dark:bg-slate-800 p-3 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
+                              <span className="font-medium text-sm text-slate-700 dark:text-slate-200 truncate pr-2">{name}</span>
+                              <span className="text-purple-600 font-bold bg-purple-100 dark:bg-purple-900/40 px-2 py-1 rounded text-xs">{count} Sold</span>
+                           </div>
+                        ))}
+                     </div>
+                   )}
+                </div>
+             </div>
           </div>
         ) : null}
 
-        {(activeTab === 'Dashboard' || activeTab === 'Sales' || activeTab === 'Purchases') && (
+        {(activeTab === 'Dashboard' || activeTab === 'Sales' || activeTab === 'Purchases' || activeTab === 'Advances') && (
           <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1">
             <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
                <h2 className="font-bold text-lg">
@@ -845,11 +1065,11 @@ const AccountantDashboard = () => {
                       </td>
                     </tr>
                   ) : (
-                    displayList.map((tx) => (
+                    displayList.map((tx, idx) => (
                       <tr key={tx.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors group">
                         <td className="px-6 py-4 align-top">
                           <div className="flex flex-col pt-1">
-                            <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">{tx.id.substring(0,8)}</span>
+                            <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">{idx + 1}</span>
                             <span className="text-xs text-slate-500">{tx.date}</span>
                             <span className={`mt-2 text-[10px] w-max px-2 py-0.5 rounded font-bold uppercase tracking-tight ${tx.type === 'Sale' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-400' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400'}`}>
                               {tx.type}
