@@ -614,7 +614,7 @@ const AccountantDashboard = () => {
     };
   }, [transactions, dashboardFilter, dashSpecificDate, dashMonth]);
 
-  const stats = parsedData.stats || { cards: parsedData.cards, details: parsedData.details };
+  const stats = { cards: parsedData.cards, details: parsedData.details };
   const displayList = useMemo(() => {
      let list = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
                 activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : 
