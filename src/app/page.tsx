@@ -772,10 +772,28 @@ const AccountantDashboard = () => {
        if (isBefore) openingCredit += advPaid;
     });
 
+    const filterStartDate = (() => {
+        if (dashboardFilter === 'Today') return new Date().toISOString().split('T')[0];
+        if (dashboardFilter === 'Yesterday') {
+           const d = new Date(); d.setDate(d.getDate() - 1);
+           return d.toISOString().split('T')[0];
+        }
+        if (dashboardFilter === 'SpecificDate') return dashSpecificDate;
+        if (dashboardFilter === 'Month') return `${dashMonth}-01`;
+        return '0000-00-00';
+    })();
+
+    const stockAtStart = Array.from(inventoryTracker.values())
+      .filter((p: any) => p.purchaseDate < filterStartDate && (!p.soldDate || p.soldDate >= filterStartDate))
+      .reduce((sum, p: any) => sum + p.purchasePrice, 0);
+
     const activeProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'ACTIVE');
     const inactiveProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'INACTIVE');
     const totalProductStockPrice = activeProducts.reduce((sum, p) => sum + p.purchasePrice, 0);
-    const openingBalance = openingCredit - openingDebit;
+    
+    // Opening Balance = Value at the START of the filter period
+    const openingBalance = stockAtStart + (openingCredit - openingDebit);
+    // Closing Balance = Value at the END of the filter period
     const closingBalance = openingBalance + (totalCredit - totalDebit);
 
     return {
@@ -788,7 +806,42 @@ const AccountantDashboard = () => {
         { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
       ],
       details: { totalDebit, totalCredit, openingBalance, closingBalance, totalProfit, totalLoss, filteredCashIn, filteredCashOut },
-      activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries())
+      activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries()),
+      monthlyData: (() => {
+         const allMonths = Array.from(new Set(sortedTx.map(t => t.date.slice(0, 7)))).sort();
+         const data: any[] = [];
+         let cumulativeCash = 0;
+         allMonths.forEach(m => {
+            const nextMonth = new Date(m);
+            nextMonth.setMonth(nextMonth.getMonth() + 1);
+            const nextMonthStr = nextMonth.toISOString().slice(0, 7);
+
+            const stockAtStart = Array.from(inventoryTracker.values())
+              .filter((p: any) => p.purchaseDate < `${m}-01` && (!p.soldDate || p.soldDate >= `${m}-01`))
+              .reduce((sum, p: any) => sum + p.purchasePrice, 0);
+            
+            const monthTx = sortedTx.filter(t => t.date.startsWith(m));
+            let mCredit = 0, mDebit = 0, mSales = 0, mPurchases = 0;
+            monthTx.forEach(tx => {
+               const txPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
+               if (tx.type === 'Purchase') { mDebit += txPaid; mPurchases += getTxTotalPurchase(tx); }
+               else if (tx.type === 'Sale') { mCredit += txPaid; mSales += getTxTotalSelling(tx); }
+               else if (tx.type === 'Cash In') { mCredit += txPaid; }
+               else if (tx.type === 'Cash Out') { mDebit += txPaid; }
+               else if (tx.type === 'Advance') { mCredit += txPaid; }
+            });
+
+            const opening = stockAtStart + cumulativeCash;
+            cumulativeCash += (mCredit - mDebit);
+            
+            const stockAtEnd = Array.from(inventoryTracker.values())
+              .filter((p: any) => p.purchaseDate < `${nextMonthStr}-01` && (!p.soldDate || p.soldDate >= `${nextMonthStr}-01`))
+              .reduce((sum, p: any) => sum + p.purchasePrice, 0);
+            
+            data.push({ month: m, opening, closing: stockAtEnd + cumulativeCash, sales: mSales, purchases: mPurchases, credit: mCredit, debit: mDebit });
+         });
+         return data.reverse();
+      })()
     };
   }, [transactions, dashboardFilter, dashSpecificDate, dashMonth]);
 
@@ -1214,11 +1267,11 @@ const AccountantDashboard = () => {
                    <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Account Balances</h3>
                    <div className="space-y-4">
                       <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
-                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Opening Balance<br/><span className="text-[10px] uppercase text-slate-400">(Till Yesterday)</span></span>
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Opening Balance<br/><span className="text-[10px] uppercase text-slate-400">(At Start of Period)</span></span>
                          <span className="text-indigo-600 dark:text-indigo-400 font-bold text-xl font-mono">₹{stats.details.openingBalance.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between items-center bg-indigo-50 dark:bg-indigo-900/20 p-4 rounded-lg shadow-sm border border-indigo-200 dark:border-indigo-800">
-                         <span className="text-indigo-800 dark:text-indigo-300 font-bold text-sm">Closing Balance<br/><span className="text-[10px] uppercase.opacity-70">(Net Available)</span></span>
+                         <span className="text-indigo-800 dark:text-indigo-300 font-bold text-sm">Closing Balance<br/><span className="text-[10px] uppercase opacity-70">(Stock + Net Profit/Loss)</span></span>
                          <span className="text-indigo-700 dark:text-indigo-400 font-bold text-2xl font-mono tracking-tight">₹{stats.details.closingBalance.toLocaleString()}</span>
                       </div>
                    </div>
@@ -1285,6 +1338,41 @@ const AccountantDashboard = () => {
                      </div>
                    )}
                 </div>
+             </div>
+             
+             <div className="mt-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">📅 Monthly Financial History</h3>
+                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl shadow-sm">
+                   <table className="w-full text-left text-sm whitespace-nowrap">
+                      <thead className="bg-slate-50 dark:bg-slate-800 text-slate-500 uppercase tracking-tighter text-[10px] font-bold">
+                         <tr>
+                            <th className="px-6 py-3">Month</th>
+                            <th className="px-6 py-3">Opening Bal.</th>
+                            <th className="px-6 py-3">Sales (Month)</th>
+                            <th className="px-6 py-3">Pur. (Month)</th>
+                            <th className="px-6 py-3">Closing Bal.</th>
+                            <th className="px-6 py-3">Net Profit/Loss</th>
+                         </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                         {parsedData.monthlyData.map((m, idx) => (
+                           <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-900/40 transition-colors group">
+                              <td className="px-6 py-4 font-bold text-slate-700 dark:text-slate-300">
+                                {new Date(m.month + '-02').toLocaleString('default', { month: 'long', year: 'numeric' })}
+                              </td>
+                              <td className="px-6 py-4 font-mono text-slate-600 dark:text-slate-400">₹{m.opening.toLocaleString()}</td>
+                              <td className="px-6 py-4 font-mono text-emerald-600">₹{m.sales.toLocaleString()}</td>
+                              <td className="px-6 py-4 font-mono text-amber-600">₹{m.purchases.toLocaleString()}</td>
+                              <td className="px-6 py-4 font-mono font-bold text-indigo-600 dark:text-indigo-400">₹{m.closing.toLocaleString()}</td>
+                              <td className={`px-6 py-4 font-bold ${m.closing - m.opening >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                {m.closing - m.opening >= 0 ? '+' : ''}₹{(m.closing - m.opening).toLocaleString()}
+                              </td>
+                           </tr>
+                         ))}
+                      </tbody>
+                   </table>
+                </div>
+                <p className="text-[10px] text-slate-400 mt-3 px-2 italic">* Balances calculated as: Stock Asset Value + Cumulative Cash Profit/Loss</p>
              </div>
           </div>
         ) : null}
