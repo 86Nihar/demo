@@ -128,6 +128,8 @@ const AccountantDashboard = () => {
   const [formGiverName, setFormGiverName] = useState('');
   const [formReceiverName, setFormReceiverName] = useState('');
   const [itemTab, setItemTab] = useState<'Active' | 'Inactive'>('Active');
+  const [inventorySearch, setInventorySearch] = useState('');
+  const [selectedInventory, setSelectedInventory] = useState<string[]>([]);
   
   const [formItems, setFormItems] = useState([{
     productName: '',
@@ -714,7 +716,7 @@ const AccountantDashboard = () => {
 
       if (tx.type === 'Purchase') {
         getTxItems(tx).forEach(it => {
-            inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE', purchaseDate: tx.date });
+            inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE', purchaseDate: tx.date, purchaseTxId: tx.id });
         });
         if (isMatch) {
             totalPurchases += txPur;
@@ -726,7 +728,7 @@ const AccountantDashboard = () => {
       } else if (tx.type === 'Sale') {
         getTxItems(tx).forEach(it => {
             const existing = inventoryTracker.get(it.imeiNo) || { ...it };
-            inventoryTracker.set(it.imeiNo, { ...existing, status: 'INACTIVE', soldDate: tx.date, sellPrice: it.sellingPrice });
+            inventoryTracker.set(it.imeiNo, { ...existing, status: 'INACTIVE', soldDate: tx.date, sellPrice: it.sellingPrice, saleTxId: tx.id });
             // Fulfill advance
             for (const [advId, advTx] of advancesMap.entries()) {
                if (getTxItems(advTx).some(advIt => advIt.imeiNo === it.imeiNo)) {
@@ -885,13 +887,22 @@ const AccountantDashboard = () => {
         }
      });
 
+     const filterBySearch = (items: any[]) => {
+        if (!inventorySearch) return items;
+        const low = inventorySearch.toLowerCase();
+        return items.filter(it => 
+           it.productName.toLowerCase().includes(low) || 
+           it.imeiNo.toLowerCase().includes(low)
+        );
+     };
+
      return { 
        list, 
        cash, 
-       activeItems: parsedData.activeProducts.filter(p => applyDateFilter(p.purchaseDate)),
-       inactiveItems: parsedData.inactiveProducts.filter(p => applyDateFilter(p.soldDate || p.purchaseDate))
+       activeItems: filterBySearch(parsedData.activeProducts.filter(p => applyDateFilter(p.purchaseDate))),
+       inactiveItems: filterBySearch(parsedData.inactiveProducts.filter(p => applyDateFilter(p.soldDate || p.purchaseDate)))
      };
-  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances, parsedData.activeProducts, parsedData.inactiveProducts]);
+  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances, parsedData.activeProducts, parsedData.inactiveProducts, inventorySearch]);
 
   const displayList = displayData.list;
 
@@ -1113,7 +1124,7 @@ const AccountantDashboard = () => {
         </div>
 
         <nav className="flex-1 px-4 space-y-1 mt-2">
-          {['Dashboard', 'Sales', 'Purchases', 'Advances', 'Cash Tracker', 'All Items', 'All Details'].map((item) => (
+          {['Dashboard', 'Sales', 'Purchases', 'Advances', 'Cash Tracker', 'Inventory', 'All Details'].map((item) => (
             <button
               key={item}
               onClick={() => setActiveTab(item)}
@@ -1586,7 +1597,7 @@ const AccountantDashboard = () => {
         </div>
       )}
 
-        {activeTab === 'All Items' && (
+        {activeTab === 'Inventory' && (
           <div className="flex flex-col gap-6 animate-in fade-in duration-300 flex-1">
             <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
@@ -1611,23 +1622,72 @@ const AccountantDashboard = () => {
             </section>
 
             <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1">
-               <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
-                 <h2 className="font-bold text-lg">Inventory Products</h2>
-                 <div className="flex bg-slate-200 dark:bg-slate-700 p-1 rounded-lg text-sm font-bold">
-                   <button onClick={() => setItemTab('Active')} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Active' ? 'bg-white dark:bg-slate-800 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>Active Items</button>
-                   <button onClick={() => setItemTab('Inactive')} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Inactive' ? 'bg-white dark:bg-slate-800 shadow-sm text-rose-600 dark:text-rose-400' : 'text-slate-500'}`}>Inactive (Sold)</button>
+               <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row justify-between lg:items-center bg-slate-50/50 dark:bg-slate-800/50 gap-4">
+                 <div className="flex items-center gap-4">
+                   <h2 className="font-bold text-lg">Inventory Products</h2>
+                   <div className="flex bg-slate-200 dark:bg-slate-700 p-1 rounded-lg text-sm font-bold">
+                     <button onClick={() => { setItemTab('Active'); setSelectedInventory([]); }} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Active' ? 'bg-white dark:bg-slate-800 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>Active Items</button>
+                     <button onClick={() => { setItemTab('Inactive'); setSelectedInventory([]); }} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Inactive' ? 'bg-white dark:bg-slate-800 shadow-sm text-rose-600 dark:text-rose-400' : 'text-slate-500'}`}>Inactive (Sold)</button>
+                   </div>
+                 </div>
+
+                 <div className="flex flex-1 w-full lg:max-w-md gap-2">
+                    <div className="relative flex-1">
+                       <input 
+                         type="text" 
+                         placeholder="Search Item Name or IMEI..." 
+                         value={inventorySearch}
+                         onChange={e => setInventorySearch(e.target.value)}
+                         className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg pl-10 pr-4 py-2 outline-none focus:border-indigo-500 text-sm transition-all"
+                       />
+                       <span className="absolute left-3 top-2.5 text-slate-400 text-sm">🔍</span>
+                    </div>
+                    {selectedInventory.length > 0 && (
+                      <button 
+                        onClick={async () => {
+                           if (!confirm(`CAUTION: You are about to delete ${selectedInventory.length} inventory records. This action will also delete their original purchase transactions. Proceed?`)) return;
+                           const toDelete = (itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems)
+                             .filter(it => selectedInventory.includes(it.imeiNo))
+                             .map(it => it.purchaseTxId)
+                             .filter((v, i, a) => a.indexOf(v) === i);
+                           
+                           for (const tid of toDelete) {
+                              await supabase.from('transactions').delete().eq('id', tid);
+                           }
+                           loadTransactions();
+                           setSelectedInventory([]);
+                        }}
+                        className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold px-4 py-2 rounded-lg transition-all shadow-sm flex items-center gap-2 whitespace-nowrap"
+                      >
+                        🗑️ Delete ({selectedInventory.length})
+                      </button>
+                    )}
                  </div>
                </div>
                
                <div className="overflow-x-auto min-h-[300px]">
                <table className="w-full text-left whitespace-nowrap">
                  <thead>
-                   <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
-                     <th className="px-6 py-4">{itemTab === 'Active' ? 'Pur. Date' : 'Sold Date'}</th>
-                     <th className="px-6 py-4">Product details</th>
+                   <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-widest font-bold">
+                     <th className="px-6 py-4 w-10">
+                       <input 
+                         type="checkbox" 
+                         className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                         checked={selectedInventory.length > 0 && selectedInventory.length === (itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems).length}
+                         onChange={(e) => {
+                           if (e.target.checked) {
+                             setSelectedInventory((itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems).map(it => it.imeiNo));
+                           } else {
+                             setSelectedInventory([]);
+                           }
+                         }}
+                       />
+                     </th>
+                     <th className="px-6 py-4">{itemTab === 'Active' ? 'Purchase Date' : 'Sold Date'}</th>
+                     <th className="px-6 py-4">Item Details</th>
                      <th className="px-6 py-4">Purchase Price</th>
                      {itemTab === 'Inactive' && <th className="px-6 py-4 text-emerald-600">Sold Price</th>}
-                     <th className="px-6 py-4 text-right">Status</th>
+                     <th className="px-6 py-4 text-right">Actions</th>
                    </tr>
                  </thead>
                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1637,22 +1697,53 @@ const AccountantDashboard = () => {
                      </tr>
                    ) : (
                      (itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems).map((it, idx) => (
-                       <tr key={idx} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors group">
+                       <tr key={`${it.imeiNo}-${idx}`} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/30 transition-colors group">
                          <td className="px-6 py-4 align-middle">
-                           <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{itemTab === 'Active' ? it.purchaseDate : (it.soldDate || it.purchaseDate)}</span>
+                            <input 
+                              type="checkbox" 
+                              className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                              checked={selectedInventory.includes(it.imeiNo)}
+                              onChange={(e) => {
+                                if (e.target.checked) setSelectedInventory([...selectedInventory, it.imeiNo]);
+                                else setSelectedInventory(selectedInventory.filter(id => id !== it.imeiNo));
+                              }}
+                            />
+                         </td>
+                         <td className="px-6 py-4 align-middle">
+                           <span className="text-xs font-semibold text-slate-500">{itemTab === 'Active' ? it.purchaseDate : (it.soldDate || it.purchaseDate)}</span>
                          </td>
                          <td className="px-6 py-4 align-middle">
                             <div className="flex flex-col">
-                               <span className="font-bold text-slate-800 dark:text-slate-200 text-sm">{it.productName}</span>
-                               <span className="text-xs font-mono text-slate-500">IMEI: {it.imeiNo}</span>
+                               <span className="font-bold text-slate-700 dark:text-slate-200 text-sm group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">{it.productName}</span>
+                               <span className="text-[10px] font-mono p-0.5 mt-0.5 bg-slate-100 dark:bg-slate-800 rounded w-fit text-slate-500 tracking-tight">IMEI: {it.imeiNo}</span>
                             </div>
                          </td>
-                         <td className="px-6 py-4 align-middle font-mono font-semibold">₹{it.purchasePrice}</td>
-                         {itemTab === 'Inactive' && <td className="px-6 py-4 align-middle font-mono font-bold text-emerald-600">₹{it.sellingPrice || it.sellPrice}</td>}
+                         <td className="px-6 py-4 align-middle font-mono font-bold text-slate-600 dark:text-slate-400">₹{it.purchasePrice.toLocaleString()}</td>
+                         {itemTab === 'Inactive' && <td className="px-6 py-4 align-middle font-mono font-bold text-emerald-600">₹{(it.sellingPrice || it.sellPrice || 0).toLocaleString()}</td>}
                          <td className="px-6 py-4 text-right align-middle">
-                           <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight ${it.status === 'ACTIVE' ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-600'}`}>
-                             {it.status}
-                           </span>
+                            <div className="flex justify-end gap-2 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                               <button 
+                                 onClick={() => {
+                                   const tid = itemTab === 'Active' ? it.purchaseTxId : it.saleTxId;
+                                   const tx = transactions.find(t => t.id === tid);
+                                   if (tx) openEditModal(tx);
+                                 }}
+                                 className="text-[10px] font-bold text-indigo-600 hover:text-white hover:bg-indigo-600 border border-indigo-200 dark:border-indigo-800 px-3 py-1 rounded-md transition-all shadow-sm flex items-center gap-1"
+                               >
+                                 ✏️ Edit
+                               </button>
+                               <button 
+                                 onClick={async () => {
+                                   if (!confirm("Are you sure you want to delete this inventory record? This will also remove the original purchase data.")) return;
+                                   const { error } = await supabase.from('transactions').delete().eq('id', it.purchaseTxId);
+                                   if (error) alert("Error deleting: " + error.message);
+                                   loadTransactions();
+                                 }}
+                                 className="text-[10px] font-bold text-rose-600 hover:text-white hover:bg-rose-600 border border-rose-200 dark:border-rose-800 px-3 py-1 rounded-md transition-all shadow-sm flex items-center gap-1"
+                               >
+                                 🗑️ Delete
+                               </button>
+                            </div>
                          </td>
                        </tr>
                      ))
