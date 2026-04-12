@@ -20,7 +20,7 @@ interface TransactionItem {
 
 interface TransactionRecord {
   id: string;
-  type: 'Sale' | 'Purchase' | 'Advance';
+  type: 'Sale' | 'Purchase' | 'Advance' | 'Cash In' | 'Cash Out';
   partyName: string;
   date: string;
   
@@ -116,13 +116,18 @@ const AccountantDashboard = () => {
   };
 
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalType, setModalType] = useState<'Sale' | 'Purchase' | 'Advance'>('Sale');
+  const [modalType, setModalType] = useState<'Sale' | 'Purchase' | 'Advance' | 'CashEntry'>('Sale');
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
   const [formPartyName, setFormPartyName] = useState('');
   const [formRemark, setFormRemark] = useState('');
   const [formGift, setFormGift] = useState('');
+  
+  const [formCashType, setFormCashType] = useState<'Cash In' | 'Cash Out'>('Cash In');
+  const [formGiverName, setFormGiverName] = useState('');
+  const [formReceiverName, setFormReceiverName] = useState('');
+  const [itemTab, setItemTab] = useState<'Active' | 'Inactive'>('Active');
   
   const [formItems, setFormItems] = useState([{
     productName: '',
@@ -137,7 +142,7 @@ const AccountantDashboard = () => {
 
   // Report Modal State
   const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [reportType, setReportType] = useState<'SalesPurchases'|'AllDetails'>('SalesPurchases');
+  const [reportType, setReportType] = useState<'SalesPurchases'|'AllDetails'|'CashReport'|'ItemsReport'>('SalesPurchases');
   const [reportFilter, setReportFilter] = useState<'All'|'Today'|'Yesterday'|'SpecificDate'|'Month'>('All');
   const [reportSpecificDate, setReportSpecificDate] = useState(new Date().toISOString().split('T')[0]);
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
@@ -191,28 +196,37 @@ const AccountantDashboard = () => {
     e.preventDefault();
     if (!user) return;
     
-    let status: 'Paid' | 'Partial' | 'Pending' = 'Pending';
-    if (totalPaid >= totalCost && totalCost > 0) status = 'Paid';
-    else if (totalPaid > 0) status = 'Partial';
-
-    const mappedItems: TransactionItem[] = formItems.map(it => ({
-      productName: it.productName,
-      imeiNo: it.imeiNo,
-      purchasePrice: Number(it.purchasePrice) || 0,
-      sellingPrice: modalType === 'Sale' ? (Number(it.sellingPrice) || 0) : 0
-    }));
-
-    const txData: any = {
+    let txData: any = {
       user_id: user.id,
-      type: modalType,
-      party_name: formPartyName,
       date: formDate,
-      items: mappedItems,
-      payment_records: formPayments,
-      payment_status: status,
       remark: formRemark,
       gift: formGift
     };
+
+    if (modalType === 'CashEntry') {
+       txData.type = formCashType;
+       txData.party_name = `${formGiverName}|||${formReceiverName}`;
+       txData.items = [];
+       txData.payment_records = [{ mode: 'Cash', amount: Number(payAmount) }];
+       txData.payment_status = 'Paid';
+    } else {
+       let status: 'Paid' | 'Partial' | 'Pending' = 'Pending';
+       if (totalPaid >= totalCost && totalCost > 0) status = 'Paid';
+       else if (totalPaid > 0) status = 'Partial';
+
+       const mappedItems: TransactionItem[] = formItems.map(it => ({
+         productName: it.productName,
+         imeiNo: it.imeiNo,
+         purchasePrice: Number(it.purchasePrice) || 0,
+         sellingPrice: modalType === 'Sale' ? (Number(it.sellingPrice) || 0) : 0
+       }));
+
+       txData.type = modalType;
+       txData.party_name = formPartyName;
+       txData.items = mappedItems;
+       txData.payment_records = formPayments;
+       txData.payment_status = status;
+    }
 
     if (editingId) {
       txData.id = editingId;
@@ -231,17 +245,96 @@ const AccountantDashboard = () => {
     }
   };
 
+  const handleBulkImport = async () => {
+      try {
+          if (!user) return alert("Must be signed in");
+          const btn = document.getElementById('import-btn');
+          if (btn) btn.innerText = "Importing...";
+          
+          const res = await fetch('/api/inventory/import');
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          
+          const products = data.products;
+          
+          let newTxCount = 0;
+          let skippedCount = 0;
+          
+          const existingImeis = new Set<string>();
+          const existingUnknowns = new Set<string>();
+          
+          transactions.forEach(tx => {
+             getTxItems(tx).forEach(it => {
+                 if (!it.imeiNo.startsWith("UNKNOWN")) existingImeis.add(it.imeiNo);
+                 else existingUnknowns.add(`${it.productName}-${it.purchasePrice}`);
+             });
+          });
+
+          for (const p of products) {
+             let exists = false;
+             if (!p.imeiNo.startsWith("UNKNOWN")) {
+                 exists = existingImeis.has(p.imeiNo);
+             } else {
+                 exists = existingUnknowns.has(`${p.name}-${p.purchasePrice}`);
+             }
+
+             if (exists) {
+                 skippedCount++;
+                 continue;
+             }
+
+             let txData = {
+                 user_id: user.id,
+                 date: p.isoDate,
+                 type: 'Purchase',
+                 party_name: 'System Import',
+                 remark: 'Imported from prodect.txt',
+                 gift: '',
+                 payment_status: 'Pending',
+                 payment_records: [],
+                 items: [{
+                     productName: p.name,
+                     imeiNo: p.imeiNo,
+                     purchasePrice: p.purchasePrice,
+                     sellingPrice: 0
+                 }]
+             };
+
+             const { error } = await supabase.from('transactions').insert([txData]);
+             if (error) {
+                 console.error("Import error", error);
+             } else {
+                 newTxCount++;
+                 if (!p.imeiNo.startsWith("UNKNOWN")) existingImeis.add(p.imeiNo);
+                 else existingUnknowns.add(`${p.name}-${p.purchasePrice}`);
+             }
+          }
+
+          loadTransactions();
+          alert(`Import complete! Added ${newTxCount} products. Skipped ${skippedCount} existing products.`);
+          if (btn) btn.innerText = "IMPORT TXT";
+      } catch (err: any) {
+          alert('Failed to import: ' + err.message);
+          const btn = document.getElementById('import-btn');
+          if (btn) btn.innerText = "IMPORT TXT";
+      }
+  };
+
   const resetForm = () => {
     setFormPartyName('');
+    setFormGiverName('');
+    setFormReceiverName('');
     setFormRemark('');
     setFormGift('');
     setFormItems([{ productName: '', imeiNo: '', purchasePrice: '', sellingPrice: '' }]);
     setFormPayments([]);
     setPayAmount('');
     setEditingId(null);
+    setFormCashType('Cash In');
   };
 
-  const openModal = (type: 'Sale' | 'Purchase' | 'Advance') => {
+  const openModal = (type: 'Sale' | 'Purchase' | 'Advance' | 'CashEntry') => {
     resetForm();
     setModalType(type);
     setIsModalOpen(true);
@@ -249,11 +342,23 @@ const AccountantDashboard = () => {
 
   const openEditModal = (tx: TransactionRecord) => {
     setEditingId(tx.id);
-    setModalType(tx.type);
     setFormDate(tx.date);
-    setFormPartyName(tx.partyName || '');
     setFormRemark(tx.remark || '');
     setFormGift(tx.gift || '');
+    
+    if (tx.type === 'Cash In' || tx.type === 'Cash Out') {
+       setModalType('CashEntry');
+       setFormCashType(tx.type);
+       const parts = (tx.partyName || '|||').split('|||');
+       setFormGiverName(parts[0] || '');
+       setFormReceiverName(parts[1] || parts[0] || '');
+       setPayAmount(tx.paymentRecords[0]?.amount || '');
+       setIsModalOpen(true);
+       return;
+    }
+
+    setModalType(tx.type as any);
+    setFormPartyName(tx.partyName || '');
     
     const itemsToEdit = getTxItems(tx).map(it => ({
        productName: it.productName,
@@ -272,7 +377,9 @@ const AccountantDashboard = () => {
     const margin = { top: 19.1, bottom: 19.1, left: 6.4, right: 6.4 };
     
     let filteredTx = [...transactions];
-    let reportTitleStr = reportType === 'AllDetails' ? "All Details Report" : "Basic Sale & Purchase Report";
+    let reportTitleStr = reportType === 'AllDetails' ? "All Details Report" : 
+                         reportType === 'CashReport' ? "Cash Tracker Report" : 
+                         reportType === 'ItemsReport' ? "Inventory Items Report" : "Basic Sale & Purchase Report";
 
     if (reportFilter === 'Today') {
       const today = new Date().toISOString().split('T')[0];
@@ -340,7 +447,7 @@ const AccountantDashboard = () => {
           autoTable(doc, { head: [advHeaders], body: advRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [245, 158, 11] } });
        }
 
-    } else {
+    } else if (reportType === 'SalesPurchases') {
        const salesTx = filteredTx.filter(t => t.type === 'Sale');
        const purchaseTx = filteredTx.filter(t => t.type === 'Purchase');
 
@@ -463,6 +570,75 @@ const AccountantDashboard = () => {
           autoTable(doc, { head: [duesCol], body: duesRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
           currentY = (doc as any).lastAutoTable.finalY + 15;
        }
+    } else if (reportType === 'CashReport') {
+       doc.setFontSize(14);
+       doc.text(`Cash Tracker Ledger`, margin.left, currentY);
+       
+       let cInTotal = 0, cOutTotal = 0;
+       const cRows: any[] = [];
+       filteredTx.forEach(tx => {
+           let inAmt = 0, outAmt = 0;
+           let desc = tx.partyName || '-';
+           
+           if (tx.type === 'Cash In') {
+               const parts = desc.split('|||');
+               inAmt = tx.paymentRecords[0]?.amount || 0;
+               desc = `Cash Given By:\n${parts[0] || '-'}\nRecv: ${parts[1] || '-'}`;
+           } else if (tx.type === 'Cash Out') {
+               const parts = desc.split('|||');
+               outAmt = tx.paymentRecords[0]?.amount || 0;
+               desc = `Cash Sent To:\n${parts[1] || '-'}\nGiver: ${parts[0] || '-'}`;
+           } else {
+               const cashP = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
+               if (cashP > 0) {
+                   if (tx.type === 'Sale' || tx.type === 'Advance') { inAmt = cashP; desc = `${tx.type} from:\n${desc}`; }
+                   if (tx.type === 'Purchase') { outAmt = cashP; desc = `${tx.type} to:\n${desc}`; }
+               }
+           }
+
+           if (tx.remark) desc += `\nMsg: ${tx.remark}`;
+
+           if (inAmt > 0 || outAmt > 0) {
+               cInTotal += inAmt;
+               cOutTotal += outAmt;
+               cRows.push([tx.date, tx.type === 'Sale' || tx.type === 'Purchase' || tx.type === 'Advance' ? `${tx.type} (Cash Auth)` : tx.type, desc, inAmt > 0 ? `Rs. ${inAmt}` : '-', outAmt > 0 ? `Rs. ${outAmt}` : '-']);
+           }
+       });
+       
+       currentY += 8;
+       doc.setFontSize(11);
+       doc.text(`Total Cash IN (Debit): Rs. ${cInTotal}`, margin.left, currentY);
+       doc.text(`Total Cash OUT (Credit): Rs. ${cOutTotal}`, margin.left, currentY + 6);
+       doc.text(`Net Cash Balance: Rs. ${cInTotal - cOutTotal}`, margin.left, currentY + 12);
+       
+       autoTable(doc, { head: [["Date", "Type", "Party / Details", "Debit (IN)", "Credit (OUT)"]], body: cRows, startY: currentY + 18, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [59, 130, 246] } });
+    } else if (reportType === 'ItemsReport') {
+       doc.setFontSize(14);
+       doc.text(`Inventory Items Ledger`, margin.left, currentY);
+       
+       const activeDateFiltered = parsedData.activeProducts.filter(p => reportFilter === 'All' || (reportFilter === 'Today' && p.purchaseDate === new Date().toISOString().split('T')[0]) || (reportFilter === 'Yesterday' && p.purchaseDate === new Date(Date.now() - 86400000).toISOString().split('T')[0]) || (reportFilter === 'SpecificDate' && p.purchaseDate === reportSpecificDate) || (reportFilter === 'Month' && p.purchaseDate?.startsWith(reportMonth)));
+       
+       const inactiveDateFiltered = parsedData.inactiveProducts.filter(p => reportFilter === 'All' || (reportFilter === 'Today' && p.soldDate === new Date().toISOString().split('T')[0]) || (reportFilter === 'Yesterday' && p.soldDate === new Date(Date.now() - 86400000).toISOString().split('T')[0]) || (reportFilter === 'SpecificDate' && p.soldDate === reportSpecificDate) || (reportFilter === 'Month' && p.soldDate?.startsWith(reportMonth)));
+       
+       currentY += 8;
+       doc.setFontSize(11);
+       doc.text(`Active Items Count: ${activeDateFiltered.length}`, margin.left, currentY);
+       doc.text(`Inactive (Sold) Items Count: ${inactiveDateFiltered.length}`, margin.left, currentY + 6);
+       
+       currentY += 12;
+       if (activeDateFiltered.length > 0) {
+           doc.setFontSize(12);
+           doc.text(`Active Options`, margin.left, currentY);
+           const aRows = activeDateFiltered.map(it => [it.purchaseDate, it.productName, it.imeiNo, `Rs. ${it.purchasePrice}`]);
+           autoTable(doc, { head: [["Purchase Date", "Product Name", "IMEI No", "Purchase Price"]], body: aRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [16, 185, 129] } });
+           currentY = (doc as any).lastAutoTable.finalY + 10;
+       }
+       if (inactiveDateFiltered.length > 0) {
+           doc.setFontSize(12);
+           doc.text(`Inactive / Sold Options`, margin.left, currentY);
+           const iRows = inactiveDateFiltered.map(it => [it.soldDate || it.purchaseDate, it.productName, it.imeiNo, `Rs. ${it.purchasePrice}`, `Rs. ${it.sellPrice}`]);
+           autoTable(doc, { head: [["Sold Date", "Product Name", "IMEI No", "Purchase Price", "Selling Price"]], body: iRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
+       }
     }
     
     setReportModalOpen(false);
@@ -538,7 +714,7 @@ const AccountantDashboard = () => {
 
       if (tx.type === 'Purchase') {
         getTxItems(tx).forEach(it => {
-            inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE' });
+            inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE', purchaseDate: tx.date });
         });
         if (isMatch) {
             totalPurchases += txPur;
@@ -549,7 +725,8 @@ const AccountantDashboard = () => {
         if (isBefore) openingDebit += txPaid;
       } else if (tx.type === 'Sale') {
         getTxItems(tx).forEach(it => {
-            inventoryTracker.set(it.imeiNo, { ...it, status: 'INACTIVE', soldDate: tx.date });
+            const existing = inventoryTracker.get(it.imeiNo) || { ...it };
+            inventoryTracker.set(it.imeiNo, { ...existing, status: 'INACTIVE', soldDate: tx.date, sellPrice: it.sellingPrice });
             // Fulfill advance
             for (const [advId, advTx] of advancesMap.entries()) {
                if (getTxItems(advTx).some(advIt => advIt.imeiNo === it.imeiNo)) {
@@ -596,6 +773,7 @@ const AccountantDashboard = () => {
     });
 
     const activeProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'ACTIVE');
+    const inactiveProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'INACTIVE');
     const totalProductStockPrice = activeProducts.reduce((sum, p) => sum + p.purchasePrice, 0);
     const openingBalance = openingCredit - openingDebit;
     const closingBalance = openingBalance + (totalCredit - totalDebit);
@@ -610,28 +788,59 @@ const AccountantDashboard = () => {
         { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
       ],
       details: { totalDebit, totalCredit, openingBalance, closingBalance, totalProfit, totalLoss, filteredCashIn, filteredCashOut },
-      activeProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries())
+      activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries())
     };
   }, [transactions, dashboardFilter, dashSpecificDate, dashMonth]);
 
   const stats = { cards: parsedData.cards, details: parsedData.details };
-  const displayList = useMemo(() => {
+  const displayData = useMemo(() => {
+     const applyDateFilter = (d: string) => {
+        if (!d) return false;
+        if (dashboardFilter === 'Today') return d === new Date().toISOString().split('T')[0];
+        if (dashboardFilter === 'Yesterday') {
+           const yesterday = new Date();
+           yesterday.setDate(yesterday.getDate() - 1);
+           return d === yesterday.toISOString().split('T')[0];
+        }
+        if (dashboardFilter === 'SpecificDate') return d === dashSpecificDate;
+        if (dashboardFilter === 'Month') return d.startsWith(dashMonth);
+        return true;
+     };
+
      let list = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
                 activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : 
                 activeTab === 'Advances' ? parsedData.activeAdvances : transactions;
      
-     return list.filter(t => {
-        if (dashboardFilter === 'Today') return t.date === new Date().toISOString().split('T')[0];
-        if (dashboardFilter === 'Yesterday') {
-           const yesterday = new Date();
-           yesterday.setDate(yesterday.getDate() - 1);
-           return t.date === yesterday.toISOString().split('T')[0];
+     list = list.filter(t => applyDateFilter(t.date));
+
+     let cash: any[] = [];
+     let filteredAll = transactions.filter(t => applyDateFilter(t.date));
+     filteredAll.forEach(tx => {
+        if (tx.type === 'Cash In' || tx.type === 'Cash Out') {
+           const parts = (tx.partyName || '|||').split('|||');
+           const amt = tx.paymentRecords[0]?.amount || 0;
+           cash.push({ id: tx.id, date: tx.date, type: tx.type, giver: parts[0] || '-', receiver: parts[1] || '-', amount: amt, in: tx.type === 'Cash In', remark: tx.remark, rawTx: tx });
+        } else {
+           const cashPaid = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
+           if (cashPaid > 0) {
+              if (tx.type === 'Sale' || tx.type === 'Advance') {
+                 cash.push({ id: tx.id, date: tx.date, type: `${tx.type} (Cash Auth)`, giver: tx.partyName || '-', receiver: 'Self', amount: cashPaid, in: true, remark: tx.remark, rawTx: tx });
+              } else if (tx.type === 'Purchase') {
+                 cash.push({ id: tx.id, date: tx.date, type: `${tx.type} (Cash Auth)`, giver: 'Self', receiver: tx.partyName || '-', amount: cashPaid, in: false, remark: tx.remark, rawTx: tx });
+              }
+           }
         }
-        if (dashboardFilter === 'SpecificDate') return t.date === dashSpecificDate;
-        if (dashboardFilter === 'Month') return t.date.startsWith(dashMonth);
-        return true;
      });
-  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances]);
+
+     return { 
+       list, 
+       cash, 
+       activeItems: parsedData.activeProducts.filter(p => applyDateFilter(p.purchaseDate)),
+       inactiveItems: parsedData.inactiveProducts.filter(p => applyDateFilter(p.soldDate || p.purchaseDate))
+     };
+  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances, parsedData.activeProducts, parsedData.inactiveProducts]);
+
+  const displayList = displayData.list;
 
 
   return (
@@ -649,113 +858,145 @@ const AccountantDashboard = () => {
             
             <form onSubmit={handleAddTransaction} className="p-6 overflow-y-auto flex-1 space-y-6">
               
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
-                <div>
-                  <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
-                  <input required type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
-                </div>
-                {remainingAmount > 0 && (
-                  <div className="animate-in fade-in zoom-in duration-300">
-                     <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : modalType === 'Advance' ? 'Customer Name' : 'Vendor Name (Due)'}</label>
-                     <input type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Advance' || modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
+              {modalType === 'CashEntry' ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
+                    <input required type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
                   </div>
-                )}
-              </div>
-
-              <div>
-                <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
-                  Product Details
-                  <button type="button" onClick={addFormItem} className="text-xs bg-slate-100 dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 rounded hover:opacity-80 transition cursor-pointer">
-                    <span>+</span> Add Another Item
-                  </button>
-                </h4>
-
-                <div className="space-y-4">
-                  {formItems.map((item, idx) => (
-                    <div key={idx} className="bg-slate-50/50 dark:bg-slate-800/20 border border-slate-200 dark:border-slate-700 p-4 rounded-xl relative group">
-                      {formItems.length > 1 && (
-                         <button type="button" onClick={() => removeFormItem(idx)} className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center bg-rose-100 text-rose-600 rounded-full text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shadow">✕</button>
-                      )}
-                      
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs font-semibold mb-1 text-slate-500">Product Name</label>
-                          <input required type="text" value={item.productName} onChange={e => updateFormItem(idx, 'productName', e.target.value)} placeholder="e.g. iPhone 15 Pro" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold mb-1 text-slate-500">IMEI Number</label>
-                          <input required type="text" value={item.imeiNo} onChange={e => updateFormItem(idx, 'imeiNo', e.target.value)} placeholder="15-digit IMEI" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 tracking-widest font-mono" />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold mb-1 text-slate-500">Purchase Price (₹)</label>
-                          <input required type="number" value={item.purchasePrice} onChange={e => updateFormItem(idx, 'purchasePrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
-                        </div>
-                        {modalType === 'Sale' && (
-                          <div>
-                            <label className="block text-xs font-semibold mb-1 text-slate-500">Selling Price (₹)</label>
-                            <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50/30 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
-                          </div>
-                        )}
-                        {modalType === 'Advance' && (
-                          <div>
-                            <label className="block text-xs font-semibold mb-1 text-slate-500">Advance Amount (₹)</label>
-                            <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-amber-50/30 border border-amber-200 rounded-lg px-4 py-2 outline-none focus:border-amber-500 font-mono" />
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                  <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Cash Type</label>
+                    <select value={formCashType} onChange={e => setFormCashType(e.target.value as any)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 cursor-pointer">
+                      <option value="Cash In">Cash In (Receive)</option>
+                      <option value="Cash Out">Cash Out (Send)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold mb-1 text-blue-500">Amount (₹)</label>
+                    <input required type="number" value={payAmount} onChange={e => setPayAmount(Number(e.target.value))} placeholder="Amount" className="w-full bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-700 rounded-lg px-4 py-2 outline-none focus:border-blue-500 font-mono" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Giver Name {formCashType === 'Cash In' && '*'}</label>
+                    <input type="text" value={formGiverName} onChange={e => setFormGiverName(e.target.value)} required={formCashType === 'Cash In'} placeholder="Name of giver" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Receiver Name {formCashType === 'Cash Out' && '*'}</label>
+                    <input type="text" value={formReceiverName} onChange={e => setFormReceiverName(e.target.value)} required={formCashType === 'Cash Out'} placeholder="Name of receiver" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                  </div>
                 </div>
-              </div>
-
-              <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
-                 <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
-                    Payment Records
-                    <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded normal-case font-medium">
-                      Total Added: ₹{totalPaid} / ₹{totalCost}
-                    </span>
-                 </h4>
-                 
-                 {(remainingAmount > 0 || totalCost === 0) ? (
-                    <div className="flex gap-2 mb-4">
-                        <input 
-                          type="number" 
-                          value={payAmount} 
-                          onChange={e => setPayAmount(Number(e.target.value))} 
-                          placeholder="Amount (₹)" 
-                          className="flex-1 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 outline-none focus:border-indigo-500 font-mono" 
-                        />
-                        <select value={payMode} onChange={e => setPayMode(e.target.value as any)} className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 outline-none focus:border-indigo-500 cursor-pointer">
-                          <option value="Cash">Cash</option>
-                          <option value="UPI">UPI</option>
-                          <option value="Credit Card">Credit Card</option>
-                          <option value="Debit Card">Debit Card</option>
-                          <option value="Netbanking">Netbanking</option>
-                          <option value="Exchange">Exchange</option>
-                        </select>
-                        <button type="button" onClick={addPayment} className="bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 font-bold px-4 rounded-lg hover:opacity-90 cursor-pointer">Add</button>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
+                    <input required type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                  </div>
+                  {remainingAmount > 0 && (
+                    <div className="animate-in fade-in zoom-in duration-300">
+                       <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : modalType === 'Advance' ? 'Customer Name' : 'Vendor Name (Due)'}</label>
+                       <input type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Advance' || modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
                     </div>
-                 ) : (
-                    <div className="mb-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 p-3 rounded-lg text-sm font-semibold flex items-center justify-between">
-                       <span>✅ Complete Amount Added</span>
-                       <span>Remaining: ₹{remainingAmount}</span>
-                    </div>
-                 )}
+                  )}
+                </div>
+              )}
 
-                 {formPayments.length > 0 && (
-                   <ul className="space-y-2 mb-4 max-h-32 overflow-y-auto">
-                     {formPayments.map((p, idx) => (
-                       <li key={idx} className="flex justify-between items-center bg-slate-50 dark:bg-slate-800/50 px-3 py-2 rounded-lg border border-slate-100 dark:border-slate-700">
-                         <div>
-                            <span className="text-xs font-bold bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400 px-2 py-0.5 rounded mr-2">{p.mode}</span>
-                            <span className="font-mono font-medium">₹{p.amount}</span>
-                         </div>
-                         <button type="button" onClick={() => removePayment(idx)} className="text-rose-400 hover:text-rose-600 font-bold px-2 cursor-pointer">✕</button>
-                       </li>
-                     ))}
-                   </ul>
-                 )}
-              </div>
+              {modalType !== 'CashEntry' && (
+                <>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
+                      Product Details
+                      <button type="button" onClick={addFormItem} className="text-xs bg-slate-100 dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 rounded hover:opacity-80 transition cursor-pointer">
+                        <span>+</span> Add Another Item
+                      </button>
+                    </h4>
+
+                    <div className="space-y-4">
+                      {formItems.map((item, idx) => (
+                        <div key={idx} className="bg-slate-50/50 dark:bg-slate-800/20 border border-slate-200 dark:border-slate-700 p-4 rounded-xl relative group">
+                          {formItems.length > 1 && (
+                             <button type="button" onClick={() => removeFormItem(idx)} className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center bg-rose-100 text-rose-600 rounded-full text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shadow">✕</button>
+                          )}
+                          
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-xs font-semibold mb-1 text-slate-500">Product Name</label>
+                              <input required type="text" value={item.productName} onChange={e => updateFormItem(idx, 'productName', e.target.value)} placeholder="e.g. iPhone 15 Pro" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold mb-1 text-slate-500">IMEI Number</label>
+                              <input required type="text" value={item.imeiNo} onChange={e => updateFormItem(idx, 'imeiNo', e.target.value)} placeholder="15-digit IMEI" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 tracking-widest font-mono" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold mb-1 text-slate-500">Purchase Price (₹)</label>
+                              <input required type="number" value={item.purchasePrice} onChange={e => updateFormItem(idx, 'purchasePrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
+                            </div>
+                            {modalType === 'Sale' && (
+                              <div>
+                                <label className="block text-xs font-semibold mb-1 text-slate-500">Selling Price (₹)</label>
+                                <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50/30 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
+                              </div>
+                            )}
+                            {modalType === 'Advance' && (
+                              <div>
+                                <label className="block text-xs font-semibold mb-1 text-slate-500">Advance Amount (₹)</label>
+                                <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-amber-50/30 border border-amber-200 rounded-lg px-4 py-2 outline-none focus:border-amber-500 font-mono" />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
+                     <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
+                        Payment Records
+                        <span className="text-xs bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded normal-case font-medium">
+                          Total Added: ₹{totalPaid} / ₹{totalCost}
+                        </span>
+                     </h4>
+                     
+                     {(remainingAmount > 0 || totalCost === 0) ? (
+                        <div className="flex gap-2 mb-4">
+                            <input 
+                              type="number" 
+                              value={payAmount} 
+                              onChange={e => setPayAmount(Number(e.target.value))} 
+                              placeholder="Amount (₹)" 
+                              className="flex-1 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 outline-none focus:border-indigo-500 font-mono" 
+                            />
+                            <select value={payMode} onChange={e => setPayMode(e.target.value as any)} className="bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 outline-none focus:border-indigo-500 cursor-pointer">
+                              <option value="Cash">Cash</option>
+                              <option value="UPI">UPI</option>
+                              <option value="Credit Card">Credit Card</option>
+                              <option value="Debit Card">Debit Card</option>
+                              <option value="Netbanking">Netbanking</option>
+                              <option value="Exchange">Exchange</option>
+                            </select>
+                            <button type="button" onClick={addPayment} className="bg-slate-800 dark:bg-slate-100 text-white dark:text-slate-900 font-bold px-4 rounded-lg hover:opacity-90 cursor-pointer">Add</button>
+                        </div>
+                     ) : (
+                        <div className="mb-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 p-3 rounded-lg text-sm font-semibold flex items-center justify-between">
+                           <span>✅ Complete Amount Added</span>
+                           <span>Remaining: ₹{remainingAmount}</span>
+                        </div>
+                     )}
+
+                     {formPayments.length > 0 && (
+                       <ul className="space-y-2 mb-4 max-h-32 overflow-y-auto">
+                         {formPayments.map((p, idx) => (
+                           <li key={idx} className="flex justify-between items-center bg-slate-50 dark:bg-slate-800/50 px-3 py-2 rounded-lg border border-slate-100 dark:border-slate-700">
+                             <div>
+                                <span className="text-xs font-bold bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400 px-2 py-0.5 rounded mr-2">{p.mode}</span>
+                                <span className="font-mono font-medium">₹{p.amount}</span>
+                             </div>
+                             <button type="button" onClick={() => removePayment(idx)} className="text-rose-400 hover:text-rose-600 font-bold px-2 cursor-pointer">✕</button>
+                           </li>
+                         ))}
+                       </ul>
+                     )}
+                  </div>
+                </>
+              )}
 
               <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
                  <div>
@@ -805,13 +1046,21 @@ const AccountantDashboard = () => {
                + PURCHASE
              </button>
            </div>
-           <button onClick={() => openModal('Advance')} className="w-full text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
-             ⭐ + ADVANCE
+           <div className="flex gap-2">
+             <button onClick={() => openModal('Advance')} className="flex-1 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+               ⭐ ADVANCE
+             </button>
+             <button onClick={() => openModal('CashEntry')} className="flex-1 text-xs font-bold bg-blue-500 hover:bg-blue-600 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+               💵 CASH IN/OUT
+             </button>
+           </div>
+           <button id="import-btn" onClick={handleBulkImport} className="w-full text-xs font-bold bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white py-2 rounded-lg transition-colors cursor-pointer mt-1">
+             ⚡ IMPORT TXT
            </button>
         </div>
 
         <nav className="flex-1 px-4 space-y-1 mt-2">
-          {['Dashboard', 'Sales', 'Purchases', 'Advances', 'All Details'].map((item) => (
+          {['Dashboard', 'Sales', 'Purchases', 'Advances', 'Cash Tracker', 'All Items', 'All Details'].map((item) => (
             <button
               key={item}
               onClick={() => setActiveTab(item)}
@@ -846,9 +1095,11 @@ const AccountantDashboard = () => {
             <div className="p-6 space-y-4">
                <div>
                   <label className="block text-xs font-semibold mb-2 text-slate-500">Report Type</label>
-                  <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-lg mb-4 text-xs font-bold">
-                     <button onClick={() => setReportType('SalesPurchases')} className={`flex-1 py-2 rounded-md transition ${reportType === 'SalesPurchases' ? 'bg-white dark:bg-slate-700 shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-slate-500'}`}>Sales & Purchases</button>
-                     <button onClick={() => setReportType('AllDetails')} className={`flex-1 py-2 rounded-md transition ${reportType === 'AllDetails' ? 'bg-white dark:bg-slate-700 shadow-sm text-indigo-600 dark:text-indigo-400' : 'text-slate-500'}`}>All Details</button>
+                  <div className="grid grid-cols-2 gap-2 mb-4 text-xs font-bold">
+                     <button onClick={() => setReportType('SalesPurchases')} className={`py-2 px-3 rounded-lg border transition ${reportType === 'SalesPurchases' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'}`}>Sales & Purc.</button>
+                     <button onClick={() => setReportType('AllDetails')} className={`py-2 px-3 rounded-lg border transition ${reportType === 'AllDetails' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'}`}>All Details</button>
+                     <button onClick={() => setReportType('CashReport')} className={`py-2 px-3 rounded-lg border transition ${reportType === 'CashReport' ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'}`}>Cash Ledger</button>
+                     <button onClick={() => setReportType('ItemsReport')} className={`py-2 px-3 rounded-lg border transition ${reportType === 'ItemsReport' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'}`}>Items Inventory</button>
                   </div>
                </div>
 
@@ -1155,6 +1406,175 @@ const AccountantDashboard = () => {
             </div>
           </div>
         )}
+
+        {activeTab === 'Cash Tracker' && (
+          <div className="flex flex-col gap-6 animate-in fade-in duration-300 flex-1">
+            <section className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-2xl w-12 h-12 flex items-center justify-center rounded-xl bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600">
+                      ⬇️
+                    </span>
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">Total Cash IN</p>
+                  <p className="text-3xl font-bold tracking-tight text-emerald-600">₹{parsedData.details.filteredCashIn.toLocaleString()}</p>
+                </div>
+                <div className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-2xl w-12 h-12 flex items-center justify-center rounded-xl bg-rose-50 dark:bg-rose-900/20 text-rose-500">
+                      ⬆️
+                    </span>
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">Total Cash OUT</p>
+                  <p className="text-3xl font-bold tracking-tight text-rose-500">₹{parsedData.details.filteredCashOut.toLocaleString()}</p>
+                </div>
+                <div className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-2xl w-12 h-12 flex items-center justify-center rounded-xl bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600">
+                      💵
+                    </span>
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">Net Amount</p>
+                  <p className="text-3xl font-bold tracking-tight text-indigo-600 dark:text-indigo-400">₹{(parsedData.details.filteredCashIn - parsedData.details.filteredCashOut).toLocaleString()}</p>
+                </div>
+            </section>
+
+            <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1">
+               <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50 gap-4">
+                 <h2 className="font-bold text-lg">Cash Operations Tracker</h2>
+               </div>
+               <div className="overflow-x-auto min-h-[300px]">
+               <table className="w-full text-left whitespace-nowrap">
+                 <thead>
+                   <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
+                     <th className="px-6 py-4">No./Date</th>
+                     <th className="px-6 py-4">Type</th>
+                     <th className="px-6 py-4">Giver / Receiver Name</th>
+                     <th className="px-6 py-4 text-emerald-600">Debit (IN)</th>
+                     <th className="px-6 py-4 text-rose-500">Credit (OUT)</th>
+                     <th className="px-6 py-4 text-right">Action</th>
+                   </tr>
+                 </thead>
+                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                   {displayData.cash.length === 0 ? (
+                     <tr>
+                       <td colSpan={6} className="py-12 text-center text-slate-500">No cash records found for this period.</td>
+                     </tr>
+                   ) : (
+                     displayData.cash.map((c, idx) => (
+                       <tr key={idx} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors group">
+                         <td className="px-6 py-4 align-top">
+                           <div className="flex flex-col pt-1">
+                             <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-300">{idx + 1}</span>
+                             <span className="text-xs text-slate-500">{c.date}</span>
+                           </div>
+                         </td>
+                         <td className="px-6 py-4 align-top pt-5">
+                             <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-tight ${c.in ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                               {c.type}
+                             </span>
+                         </td>
+                         <td className="px-6 py-4 align-top">
+                            <div className="flex flex-col gap-1 text-xs mt-1">
+                               <div className="font-semibold text-slate-700 dark:text-slate-300">From: <span className="font-bold uppercase text-slate-500">{c.giver}</span></div>
+                               <div className="font-semibold text-slate-700 dark:text-slate-300">To: <span className="font-bold uppercase text-slate-500">{c.receiver}</span></div>
+                               {c.remark && <span className="text-[10px] text-slate-400 mt-1">"{c.remark}"</span>}
+                            </div>
+                         </td>
+                         <td className="px-6 py-4 align-top pt-5 text-emerald-600 font-mono font-bold">{c.in ? `₹${c.amount}` : '-'}</td>
+                         <td className="px-6 py-4 align-top pt-5 text-rose-500 font-mono font-bold">{!c.in ? `₹${c.amount}` : '-'}</td>
+                         <td className="px-6 py-4 text-right align-top pt-5">
+                           <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button onClick={() => openEditModal(c.rawTx)} className="text-xs text-indigo-500 hover:underline bg-indigo-50 px-2 py-0.5 rounded">View / Edit</button>
+                           </div>
+                         </td>
+                       </tr>
+                     ))
+                   )}
+                 </tbody>
+               </table>
+             </div>
+          </div>
+        </div>
+      )}
+
+        {activeTab === 'All Items' && (
+          <div className="flex flex-col gap-6 animate-in fade-in duration-300 flex-1">
+            <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-2xl w-12 h-12 flex items-center justify-center rounded-xl bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600">
+                      📦
+                    </span>
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">Total Active Products</p>
+                  <p className="text-3xl font-bold tracking-tight text-emerald-600">{displayData.activeItems.length}</p>
+                </div>
+
+                <div className="bg-white dark:bg-[#1e293b] p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-2xl w-12 h-12 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-500">
+                      🏷️
+                    </span>
+                  </div>
+                  <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">Total Inactive (Sold) Products</p>
+                  <p className="text-3xl font-bold tracking-tight text-slate-600 dark:text-slate-300">{displayData.inactiveItems.length}</p>
+                </div>
+            </section>
+
+            <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1">
+               <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
+                 <h2 className="font-bold text-lg">Inventory Products</h2>
+                 <div className="flex bg-slate-200 dark:bg-slate-700 p-1 rounded-lg text-sm font-bold">
+                   <button onClick={() => setItemTab('Active')} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Active' ? 'bg-white dark:bg-slate-800 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>Active Items</button>
+                   <button onClick={() => setItemTab('Inactive')} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Inactive' ? 'bg-white dark:bg-slate-800 shadow-sm text-rose-600 dark:text-rose-400' : 'text-slate-500'}`}>Inactive (Sold)</button>
+                 </div>
+               </div>
+               
+               <div className="overflow-x-auto min-h-[300px]">
+               <table className="w-full text-left whitespace-nowrap">
+                 <thead>
+                   <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
+                     <th className="px-6 py-4">{itemTab === 'Active' ? 'Pur. Date' : 'Sold Date'}</th>
+                     <th className="px-6 py-4">Product details</th>
+                     <th className="px-6 py-4">Purchase Price</th>
+                     {itemTab === 'Inactive' && <th className="px-6 py-4 text-emerald-600">Sold Price</th>}
+                     <th className="px-6 py-4 text-right">Status</th>
+                   </tr>
+                 </thead>
+                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                   {(itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems).length === 0 ? (
+                     <tr>
+                       <td colSpan={5} className="py-12 text-center text-slate-500">No products found in this category.</td>
+                     </tr>
+                   ) : (
+                     (itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems).map((it, idx) => (
+                       <tr key={idx} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors group">
+                         <td className="px-6 py-4 align-middle">
+                           <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{itemTab === 'Active' ? it.purchaseDate : (it.soldDate || it.purchaseDate)}</span>
+                         </td>
+                         <td className="px-6 py-4 align-middle">
+                            <div className="flex flex-col">
+                               <span className="font-bold text-slate-800 dark:text-slate-200 text-sm">{it.productName}</span>
+                               <span className="text-xs font-mono text-slate-500">IMEI: {it.imeiNo}</span>
+                            </div>
+                         </td>
+                         <td className="px-6 py-4 align-middle font-mono font-semibold">₹{it.purchasePrice}</td>
+                         {itemTab === 'Inactive' && <td className="px-6 py-4 align-middle font-mono font-bold text-emerald-600">₹{it.sellingPrice || it.sellPrice}</td>}
+                         <td className="px-6 py-4 text-right align-middle">
+                           <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight ${it.status === 'ACTIVE' ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-600'}`}>
+                             {it.status}
+                           </span>
+                         </td>
+                       </tr>
+                     ))
+                   )}
+                 </tbody>
+               </table>
+             </div>
+          </div>
+        </div>
+      )}
       </main>
     </div>
   );
