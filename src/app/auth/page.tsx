@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
 export default function AuthPage() {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -30,6 +30,12 @@ export default function AuthPage() {
         });
         if (error) throw error;
         setSuccess('Account created! Please check your email to confirm your account, then log in.');
+      } else if (mode === 'reset') {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: `${window.location.origin}/auth/update-password`,
+        });
+        if (error) throw error;
+        setSuccess('Password reset link sent! Please check your email.');
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -76,6 +82,13 @@ export default function AuthPage() {
               Register
             </button>
           </div>
+          
+          {mode === 'reset' && (
+            <div className="mb-4 text-center">
+              <h2 className="text-xl font-semibold text-white mb-2">Reset Password</h2>
+              <p className="text-sm text-slate-400">Enter your email address and we'll send you a link to reset your password.</p>
+            </div>
+          )}
 
           {/* Error / Success Messages */}
           {error && (
@@ -118,27 +131,52 @@ export default function AuthPage() {
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1.5">Password</label>
-              <input
-                required
-                type="password"
-                id="auth-password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Minimum 6 characters"
-                minLength={6}
-                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-slate-500 outline-none focus:border-indigo-500 focus:bg-white/10 transition text-sm"
-              />
-            </div>
+            {mode !== 'reset' && (
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1.5">Password</label>
+                <input
+                  required
+                  type="password"
+                  id="auth-password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Minimum 6 characters"
+                  minLength={6}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-slate-500 outline-none focus:border-indigo-500 focus:bg-white/10 transition text-sm"
+                />
+                {mode === 'login' && (
+                  <div className="flex justify-end mt-2">
+                    <button
+                      type="button"
+                      onClick={() => { setMode('reset'); setError(''); setSuccess(''); }}
+                      className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                    >
+                      Forgot Password?
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
 
             <button
               type="submit"
               disabled={loading}
               className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-indigo-500/20 mt-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {loading ? '⏳ Please wait...' : mode === 'login' ? '🔐 Sign In to Dashboard' : '🚀 Create Account'}
+              {loading ? '⏳ Please wait...' : mode === 'login' ? '🔐 Sign In to Dashboard' : mode === 'register' ? '🚀 Create Account' : '✉️ Send Reset Link'}
             </button>
+
+            {mode === 'reset' && (
+              <div className="text-center mt-4">
+                <button
+                  type="button"
+                  onClick={() => { setMode('login'); setError(''); setSuccess(''); }}
+                  className="text-sm text-slate-400 hover:text-white transition-colors"
+                >
+                  🔙 Back to Login
+                </button>
+              </div>
+            )}
           </form>
         </div>
 

@@ -128,7 +128,8 @@ const AccountantDashboard = () => {
   const [formGiverName, setFormGiverName] = useState('');
   const [formReceiverName, setFormReceiverName] = useState('');
   const [itemTab, setItemTab] = useState<'Active' | 'Inactive'>('Active');
-  const [inventorySearch, setInventorySearch] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [selectedInventory, setSelectedInventory] = useState<string[]>([]);
   
   const [formItems, setFormItems] = useState([{
@@ -172,6 +173,35 @@ const AccountantDashboard = () => {
     const newItems = [...formItems];
     newItems[index] = { ...newItems[index], [field]: value };
     setFormItems(newItems);
+
+    // Advance Detection Logic
+    if (modalType === 'Sale' && field === 'imeiNo' && value) {
+       const matchingAdv = parsedData.activeAdvances.find(adv => 
+          getTxItems(adv).some(it => it.imeiNo === value)
+       );
+       
+       if (matchingAdv) {
+          const advItems = getTxItems(matchingAdv);
+          const advItem = advItems.find(it => it.imeiNo === value);
+          const advPaid = matchingAdv.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
+
+          if (confirm(`Found active Advance for this IMEI!\nCustomer: ${matchingAdv.partyName}\nAdvance Amount: ₹${advPaid}\n\nDo you want to add this amount to current Sale payments?`)) {
+             // Add payment record
+             setFormPayments(prev => [...prev, { mode: 'Cash', amount: advPaid }]);
+             // Fill customer name
+             setFormPartyName(matchingAdv.partyName);
+             // Optionally fill product name
+             if (advItem) {
+                newItems[index].productName = advItem.productName;
+                newItems[index].purchasePrice = advItem.purchasePrice;
+                setFormItems([...newItems]);
+             }
+             // Store the advance ID to delete on save
+             (window as any)._pendingAdvanceId = matchingAdv.id;
+             alert("Advance added to payments. The old advance record will be removed upon saving this sale.");
+          }
+       }
+    }
   };
 
   const addFormItem = () => {
@@ -241,6 +271,13 @@ const AccountantDashboard = () => {
     if (error) {
        alert("Error saving transaction: " + error.message);
     } else {
+       // Handle pending advance deletion
+       const pendingAdvId = (window as any)._pendingAdvanceId;
+       if (pendingAdvId) {
+          await supabase.from('transactions').delete().eq('id', pendingAdvId);
+          (window as any)._pendingAdvanceId = null;
+       }
+       
        loadTransactions();
        setIsModalOpen(false);
        resetForm();
@@ -662,23 +699,24 @@ const AccountantDashboard = () => {
   };
 
   const parsedData = useMemo(() => {
-    let totalsales = 0, totalPurchases = 0, totalProfit = 0, totalLoss = 0, todaySalesCount = 0, todayPurchasesCount = 0;
-    let totalDebit = 0, totalCredit = 0, openingCredit = 0, openingDebit = 0;
-    let filteredCashIn = 0, filteredCashOut = 0;
 
-    const inventoryTracker = new Map<string, any>(); 
-    const giftTracker = new Map<string, {in: number, out: number}>();
-    const modelTracker = new Map<string, number>();
-    const advancesMap = new Map<string, TransactionRecord>();
+
 
     const sortedTx = [...transactions].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     
-    // Pass 1: find advances
-    sortedTx.forEach(tx => {
-      if (tx.type === 'Advance') {
-        advancesMap.set(tx.id, tx);
-      }
-    });
+    // 1. Identify Day 1
+    const day1Date = sortedTx.length > 0 ? sortedTx[0].date : null;
+
+    const filterStartDate = (() => {
+        if (dashboardFilter === 'Today') return new Date().toISOString().split('T')[0];
+        if (dashboardFilter === 'Yesterday') {
+           const d = new Date(); d.setDate(d.getDate() - 1);
+           return d.toISOString().split('T')[0];
+        }
+        if (dashboardFilter === 'SpecificDate') return dashSpecificDate;
+        if (dashboardFilter === 'Month') return `${dashMonth}-01`;
+        return '0000-00-00';
+    })();
 
     const isFilterMatch = (d: string) => {
         if (dashboardFilter === 'Today') return d === new Date().toISOString().split('T')[0];
@@ -693,154 +731,155 @@ const AccountantDashboard = () => {
     };
     
     const isBeforeFilter = (d: string) => {
-        if (dashboardFilter === 'Today') return d < new Date().toISOString().split('T')[0];
-        if (dashboardFilter === 'Yesterday') {
-           const yesterday = new Date();
-           yesterday.setDate(yesterday.getDate() - 1);
-           return d < yesterday.toISOString().split('T')[0];
-        }
-        if (dashboardFilter === 'SpecificDate') return d < dashSpecificDate;
-        if (dashboardFilter === 'Month') return d < dashMonth;
-        return false;
+        return d < filterStartDate;
     };
+
+    // 2. Reference Point: Opening Balance (April 1, 2026) = ₹33,02,299
+    // Formula: Closing = Opening + Purchases - (Sales - Profit)
+    // NOTE: Sales - Profit = Cost of Sold items.
+    // So: Closing = Opening + Purchases - CostOfSold
+    const REFERENCE_DATE = '2026-04-01';
+    const REFERENCE_OPENING_BALANCE = 3302299;
+
+    // Accumulators for Balance
+    let cumulativePurchasesBefore = 0;
+    let periodPurchases = 0;
+    let cumulativeCostOfSoldBefore = 0;
+    let periodCostOfSold = 0;
+
+    // Accumulators for Profit & Others
+    let cumulativeProfitBefore = 0;
+    let periodProfit = 0;
+
+    // Tracker for stats cards
+    let filteredSalesTotal = 0, filteredPurchasesTotal = 0;
+    let filteredCashIn = 0, filteredCashOut = 0;
+    let todaySalesCount = 0, todayPurchasesCount = 0;
+
+    const inventoryTracker = new Map<string, any>(); 
+    const giftTracker = new Map<string, {in: number, out: number}>();
+    const modelTracker = new Map<string, number>();
+    const advancesMap = new Map<string, TransactionRecord>();
 
     sortedTx.forEach(tx => {
       const txPur = getTxTotalPurchase(tx);
       const txSell = getTxTotalSelling(tx);
       const isToday = tx.date === new Date().toISOString().split('T')[0];
-      let txPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
-      let txCashPaid = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
-
       const isMatch = isFilterMatch(tx.date);
       const isBefore = isBeforeFilter(tx.date);
+      
+      const txCashInTotal = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
 
+      // Balance Tracking (Since Reference Date)
+      if (tx.date >= REFERENCE_DATE) {
+          const txCostOfSold = (tx.type === 'Sale') ? txPur : 0;
+          const txPurchasedActual = (tx.type === 'Purchase') ? txPur : 0;
+
+          if (isBefore) {
+              cumulativePurchasesBefore += txPurchasedActual;
+              cumulativeCostOfSoldBefore += txCostOfSold;
+          }
+          if (isMatch) {
+              periodPurchases += txPurchasedActual;
+              periodCostOfSold += txCostOfSold;
+          }
+      }
+
+      // Inventory Tracking
       if (tx.type === 'Purchase') {
         getTxItems(tx).forEach(it => {
             inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE', purchaseDate: tx.date, purchaseTxId: tx.id });
         });
         if (isMatch) {
-            totalPurchases += txPur;
-            totalDebit += txPaid;
-            filteredCashOut += txCashPaid;
+            filteredPurchasesTotal += txPur;
+            filteredCashOut += txCashInTotal;
             if (isToday) todayPurchasesCount += getTxItems(tx).length;
         }
-        if (isBefore) openingDebit += txPaid;
       } else if (tx.type === 'Sale') {
         getTxItems(tx).forEach(it => {
-            const existing = inventoryTracker.get(it.imeiNo) || { ...it };
-            inventoryTracker.set(it.imeiNo, { ...existing, status: 'INACTIVE', soldDate: tx.date, sellPrice: it.sellingPrice, saleTxId: tx.id });
-            // Fulfill advance
-            for (const [advId, advTx] of advancesMap.entries()) {
-               if (getTxItems(advTx).some(advIt => advIt.imeiNo === it.imeiNo)) {
-                  advancesMap.delete(advId);
-                  break;
-               }
-            }
+            const existing = inventoryTracker.get(it.imeiNo) || {};
+            inventoryTracker.set(it.imeiNo, { ...existing, ...it, status: 'INACTIVE', soldDate: tx.date, saleTxId: tx.id, purchaseTxId: existing.purchaseTxId });
         });
         if (isMatch) {
-            totalsales += txSell;
-            totalCredit += txPaid;
-            filteredCashIn += txCashPaid;
-            const diff = txSell - txPur;
-            if (diff > 0) totalProfit += diff; else if (diff < 0) totalLoss += Math.abs(diff);
+            filteredSalesTotal += txSell;
+            filteredCashIn += txCashInTotal;
             if (isToday) todaySalesCount += getTxItems(tx).length;
             
             getTxItems(tx).forEach(it => {
                modelTracker.set(it.productName, (modelTracker.get(it.productName) || 0) + 1);
             });
-            
             if (tx.gift) {
                const g = giftTracker.get(tx.gift) || {in: 0, out: 0};
                g.out += 1;
                giftTracker.set(tx.gift, g);
             }
         }
-        if (isBefore) openingCredit += txPaid;
+      } else if (tx.type === 'Cash In') {
+         if (isMatch) filteredCashIn += txCashInTotal;
+      } else if (tx.type === 'Cash Out') {
+         if (isMatch) filteredCashOut += txCashInTotal;
+      } else if (tx.type === 'Advance') {
+         advancesMap.set(tx.id, tx);
+         if (isMatch) filteredCashIn += txCashInTotal;
       }
-      // Note: Advance financials are excluded from this loop to prevent double counting 
-      // when they are converted to Sales. Only unfulfilled advances will be added later.
+
+      // Profit Calculation (Strictly following: Profit = Sales - Cost of Sold Items)
+      if (tx.type === 'Sale') {
+         const currentTxProfit = txSell - txPur;
+         if (isBefore) cumulativeProfitBefore += currentTxProfit;
+         if (isMatch) periodProfit += currentTxProfit;
+      }
     });
 
-    // Add financials ONLY for Unfulfilled Advances
-    Array.from(advancesMap.values()).forEach(advTx => {
-       const isMatch = isFilterMatch(advTx.date);
-       const isBefore = isBeforeFilter(advTx.date);
-       let advPaid = advTx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
-       let advCashPaid = advTx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
-       if (isMatch) {
-           totalCredit += advPaid;
-           filteredCashIn += advCashPaid;
-       }
-       if (isBefore) openingCredit += advPaid;
-    });
-
-    const filterStartDate = (() => {
-        if (dashboardFilter === 'Today') return new Date().toISOString().split('T')[0];
-        if (dashboardFilter === 'Yesterday') {
-           const d = new Date(); d.setDate(d.getDate() - 1);
-           return d.toISOString().split('T')[0];
-        }
-        if (dashboardFilter === 'SpecificDate') return dashSpecificDate;
-        if (dashboardFilter === 'Month') return `${dashMonth}-01`;
-        return '0000-00-00';
-    })();
-
-    const stockAtStart = Array.from(inventoryTracker.values())
-      .filter((p: any) => p.purchaseDate < filterStartDate && (!p.soldDate || p.soldDate >= filterStartDate))
-      .reduce((sum, p: any) => sum + p.purchasePrice, 0);
+    // Opening Balance (Day n) = Reference Balance + Cumulative (Purchases - CostSold) until Day n-1
+    const openingBalance = REFERENCE_OPENING_BALANCE + cumulativePurchasesBefore - cumulativeCostOfSoldBefore;
+    // Closing Balance (Day n) = Opening Balance + (Purchases - CostSold) during that day/period
+    const closingBalance = openingBalance + periodPurchases - periodCostOfSold;
 
     const activeProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'ACTIVE');
     const inactiveProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'INACTIVE');
     const totalProductStockPrice = activeProducts.reduce((sum, p) => sum + p.purchasePrice, 0);
-    
-    // Opening Balance = Value at the START of the filter period
-    const openingBalance = stockAtStart + (openingCredit - openingDebit);
-    // Closing Balance = Value at the END of the filter period
-    const closingBalance = openingBalance + (totalCredit - totalDebit);
 
     return {
       cards: [
-        { label: 'Total Sales (Filtered)', value: `₹${totalsales.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
-        { label: 'Total Purchases (Filtered)', value: `₹${totalPurchases.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
-        { label: 'Net Cash In Hand', value: `₹${(filteredCashIn - filteredCashOut).toLocaleString()}`, icon: '💵', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Total Sales (Filtered)', value: `₹${filteredSalesTotal.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Total Purchases (Filtered)', value: `₹${filteredPurchasesTotal.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
+        { label: 'Net Cash In Hand (Filtered)', value: `₹${(filteredCashIn - filteredCashOut).toLocaleString()}`, icon: '💵', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
         { label: 'Cash IN (Filtered)', value: `₹${filteredCashIn.toLocaleString()}`, icon: '⬇️', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
         { label: 'Cash OUT (Filtered)', value: `₹${filteredCashOut.toLocaleString()}`, icon: '⬆️', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
         { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
       ],
-      details: { totalDebit, totalCredit, openingBalance, closingBalance, totalProfit, totalLoss, filteredCashIn, filteredCashOut },
+      details: { totalDebit: 0, totalCredit: 0, openingBalance, closingBalance, totalProfit: periodProfit, totalLoss: 0, filteredCashIn, filteredCashOut, filteredSalesTotal, filteredPurchasesTotal },
       activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries()),
       monthlyData: (() => {
          const allMonths = Array.from(new Set(sortedTx.map(t => t.date.slice(0, 7)))).sort();
          const data: any[] = [];
-         let cumulativeCash = 0;
-         allMonths.forEach(m => {
-            const nextMonth = new Date(m);
-            nextMonth.setMonth(nextMonth.getMonth() + 1);
-            const nextMonthStr = nextMonth.toISOString().slice(0, 7);
+         
+         let runningBalance = REFERENCE_OPENING_BALANCE;
 
-            const stockAtStart = Array.from(inventoryTracker.values())
-              .filter((p: any) => p.purchaseDate < `${m}-01` && (!p.soldDate || p.soldDate >= `${m}-01`))
-              .reduce((sum, p: any) => sum + p.purchasePrice, 0);
-            
+         allMonths.filter(m => m >= REFERENCE_DATE.slice(0, 7)).forEach(m => {
             const monthTx = sortedTx.filter(t => t.date.startsWith(m));
-            let mCredit = 0, mDebit = 0, mSales = 0, mPurchases = 0;
+            let mSalesValue = 0, mPurchasesValue = 0;
+            let mProfit = 0, mCostOfSold = 0;
+
             monthTx.forEach(tx => {
-               const txPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
-               if (tx.type === 'Purchase') { mDebit += txPaid; mPurchases += getTxTotalPurchase(tx); }
-               else if (tx.type === 'Sale') { mCredit += txPaid; mSales += getTxTotalSelling(tx); }
-               else if (tx.type === 'Cash In') { mCredit += txPaid; }
-               else if (tx.type === 'Cash Out') { mDebit += txPaid; }
-               else if (tx.type === 'Advance') { mCredit += txPaid; }
+               const txPur = getTxTotalPurchase(tx);
+               const txSell = getTxTotalSelling(tx);
+
+               if (tx.type === 'Sale') {
+                  mSalesValue += txSell;
+                  mProfit += (txSell - txPur);
+                  mCostOfSold += txPur;
+               } else if (tx.type === 'Purchase') {
+                  mPurchasesValue += txPur;
+               }
             });
 
-            const opening = stockAtStart + cumulativeCash;
-            cumulativeCash += (mCredit - mDebit);
+            const opening = runningBalance;
+            // Balance Formula: Closing = Opening + Purchases - CostOfSold
+            runningBalance = runningBalance + mPurchasesValue - mCostOfSold;
             
-            const stockAtEnd = Array.from(inventoryTracker.values())
-              .filter((p: any) => p.purchaseDate < `${nextMonthStr}-01` && (!p.soldDate || p.soldDate >= `${nextMonthStr}-01`))
-              .reduce((sum, p: any) => sum + p.purchasePrice, 0);
-            
-            data.push({ month: m, opening, closing: stockAtEnd + cumulativeCash, sales: mSales, purchases: mPurchases, credit: mCredit, debit: mDebit });
+            data.push({ month: m, opening, closing: runningBalance, sales: mSalesValue, purchases: mPurchasesValue, profit: mProfit });
          });
          return data.reverse();
       })()
@@ -887,9 +926,24 @@ const AccountantDashboard = () => {
         }
      });
 
+     if (searchQuery) {
+       const q = searchQuery.toLowerCase();
+       list = list.filter(t => 
+         (t.partyName && t.partyName.toLowerCase().includes(q)) ||
+         (t.remark && t.remark.toLowerCase().includes(q)) ||
+         getTxItems(t).some(it => it.productName.toLowerCase().includes(q) || it.imeiNo.toLowerCase().includes(q))
+       );
+       cash = cash.filter(c => 
+         c.giver.toLowerCase().includes(q) || 
+         c.receiver.toLowerCase().includes(q) || 
+         (c.remark && c.remark.toLowerCase().includes(q)) || 
+         c.type.toLowerCase().includes(q)
+       );
+     }
+
      const filterBySearch = (items: any[]) => {
-        if (!inventorySearch) return items;
-        const low = inventorySearch.toLowerCase();
+        if (!searchQuery) return items;
+        const low = searchQuery.toLowerCase();
         return items.filter(it => 
            it.productName.toLowerCase().includes(low) || 
            it.imeiNo.toLowerCase().includes(low)
@@ -902,7 +956,7 @@ const AccountantDashboard = () => {
        activeItems: filterBySearch(parsedData.activeProducts.filter(p => applyDateFilter(p.purchaseDate))),
        inactiveItems: filterBySearch(parsedData.inactiveProducts.filter(p => applyDateFilter(p.soldDate || p.purchaseDate)))
      };
-  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances, parsedData.activeProducts, parsedData.inactiveProducts, inventorySearch]);
+  }, [transactions, activeTab, dashboardFilter, dashSpecificDate, dashMonth, parsedData.activeAdvances, parsedData.activeProducts, parsedData.inactiveProducts, searchQuery]);
 
   const displayList = displayData.list;
 
@@ -1086,8 +1140,11 @@ const AccountantDashboard = () => {
         </div>
       )}
 
+      {showMobileMenu && (
+        <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setShowMobileMenu(false)} />
+      )}
       {/* Sidebar */}
-      <aside className="w-64 bg-white dark:bg-[#1e293b] border-r border-slate-200 dark:border-slate-800 flex flex-col hidden lg:flex">
+      <aside className={`w-64 bg-white dark:bg-[#1e293b] border-r border-slate-200 dark:border-slate-800 flex flex-col fixed inset-y-0 left-0 z-40 transform transition-transform duration-300 lg:relative lg:translate-x-0 ${showMobileMenu ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:flex'}`}>
         <div className="p-6 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-center gap-3">
             <img src="/logo.png" alt="EZY Logo" className="w-12 h-12 object-contain rounded-full shadow-sm bg-white" onError={(e) => {
@@ -1127,7 +1184,7 @@ const AccountantDashboard = () => {
           {['Dashboard', 'Sales', 'Purchases', 'Advances', 'Cash Tracker', 'Inventory', 'All Details'].map((item) => (
             <button
               key={item}
-              onClick={() => setActiveTab(item)}
+              onClick={() => { setActiveTab(item); setShowMobileMenu(false); }}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
                 activeTab === item 
                   ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-medium' 
@@ -1207,16 +1264,42 @@ const AccountantDashboard = () => {
       {/* Main Content */}
       <main className="flex-1 flex flex-col p-4 lg:p-8 max-w-[1400px] mx-auto w-full">
         {/* Header */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8 border-b border-slate-200 dark:border-slate-800 pb-4">
-          <div>
-            <h1 className="text-2xl font-bold">{activeTab} Overview</h1>
-            <p className="text-slate-500 dark:text-slate-400">Inventory, Advances & Sales financial reports.</p>
+        <header className="flex flex-col gap-4 mb-8 border-b border-slate-200 dark:border-slate-800 pb-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold">{activeTab} Overview</h1>
+              <p className="text-slate-500 dark:text-slate-400 hidden sm:block">Inventory, Advances & Sales financial reports.</p>
+            </div>
+            <button onClick={() => setShowMobileMenu(true)} className="lg:hidden p-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-xl">
+              ☰
+            </button>
           </div>
           
-          <div className="flex flex-col md:flex-row items-center gap-4 bg-white dark:bg-slate-800 p-2 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700">
-              <div className="flex items-center gap-2 px-2 border-r border-slate-200 dark:border-slate-700">
+          <div className="flex flex-col xl:flex-row items-center gap-4 w-full">
+            <div className="relative w-full xl:w-96">
+               <input 
+                 type="text" 
+                 placeholder="Search all..." 
+                 value={searchQuery}
+                 onChange={e => setSearchQuery(e.target.value)}
+                 className="w-full bg-white dark:bg-[#1e293b] border border-slate-200 dark:border-slate-700 rounded-xl pl-10 pr-10 py-2.5 outline-none focus:border-indigo-500 shadow-sm"
+               />
+               <span className="absolute left-3 top-2.5 text-slate-400 text-lg">🔍</span>
+               {searchQuery && (
+                 <button 
+                   onClick={() => setSearchQuery('')} 
+                   className="absolute right-3 top-3 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 text-xs font-bold bg-slate-100 dark:bg-slate-700 rounded-full w-5 h-5 flex items-center justify-center cursor-pointer transition-colors"
+                   title="Clear search"
+                 >
+                   ✕
+                 </button>
+               )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center gap-2 bg-white dark:bg-slate-800 p-2 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 w-full xl:w-auto">
+              <div className="flex flex-wrap sm:flex-nowrap items-center justify-center gap-2 px-2 sm:border-r border-slate-200 dark:border-slate-700 w-full sm:w-auto pb-2 sm:pb-0 relative z-10">
                 <span className="text-xs font-bold text-slate-400">FILTER:</span>
-                <select value={dashboardFilter} onChange={e => setDashboardFilter(e.target.value as any)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none">
+                <select value={dashboardFilter} onChange={e => setDashboardFilter(e.target.value as any)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm font-semibold outline-none w-full sm:w-auto cursor-pointer">
                   <option value="All">All Time</option>
                   <option value="Today">Today</option>
                   <option value="Yesterday">Yesterday</option>
@@ -1224,16 +1307,16 @@ const AccountantDashboard = () => {
                   <option value="SpecificDate">Specific Date</option>
                 </select>
                 {dashboardFilter === 'SpecificDate' && (
-                  <input type="date" value={dashSpecificDate} onChange={e => setDashSpecificDate(e.target.value)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none" />
+                  <input type="date" value={dashSpecificDate} onChange={e => setDashSpecificDate(e.target.value)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none w-full sm:w-auto cursor-pointer" />
                 )}
                 {dashboardFilter === 'Month' && (
-                  <input type="month" value={dashMonth} onChange={e => setDashMonth(e.target.value)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none" />
+                  <input type="month" value={dashMonth} onChange={e => setDashMonth(e.target.value)} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none w-full sm:w-auto cursor-pointer" />
                 )}
               </div>
-            
-            <button onClick={() => setReportModalOpen(true)} className="px-4 py-2 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 font-bold rounded-lg hover:bg-indigo-100 cursor-pointer transition-colors flex items-center gap-2">
-              <span>📄</span> Generate Report
-            </button>
+              <button onClick={() => setReportModalOpen(true)} className="w-full sm:w-auto px-4 py-2 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 font-bold rounded-lg hover:bg-indigo-100 cursor-pointer transition-colors flex items-center justify-center gap-2 whitespace-nowrap">
+                <span>📄</span> Report
+              </button>
+            </div>
           </div>
         </header>
 
@@ -1261,28 +1344,28 @@ const AccountantDashboard = () => {
              
              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
                 <div className="bg-slate-50 dark:bg-slate-900/50 p-6 rounded-xl border border-slate-200 dark:border-slate-700">
-                   <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Cash Flow (All Time)</h3>
+                   <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Cash Flow (Filtered Period)</h3>
                    <div className="space-y-4">
                       <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
-                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Total Credit (Cash In)</span>
-                         <span className="text-emerald-600 dark:text-emerald-400 font-bold text-xl font-mono">₹{stats.details.totalCredit.toLocaleString()}</span>
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Cash Received (In)</span>
+                         <span className="text-emerald-600 dark:text-emerald-400 font-bold text-xl font-mono">₹{stats.details.filteredCashIn.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
-                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Total Debit (Cash Out)</span>
-                         <span className="text-rose-600 dark:text-rose-400 font-bold text-xl font-mono">₹{stats.details.totalDebit.toLocaleString()}</span>
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Cash Paid (Out)</span>
+                         <span className="text-rose-600 dark:text-rose-400 font-bold text-xl font-mono">₹{stats.details.filteredCashOut.toLocaleString()}</span>
                       </div>
                    </div>
                 </div>
 
                 <div className="bg-slate-50 dark:bg-slate-900/50 p-6 rounded-xl border border-slate-200 dark:border-slate-700">
-                   <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Account Balances</h3>
+                   <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Balance Summary</h3>
                    <div className="space-y-4">
                       <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-100 dark:border-slate-700">
-                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Opening Balance<br/><span className="text-[10px] uppercase text-slate-400">(At Start of Period)</span></span>
+                         <span className="text-slate-600 dark:text-slate-300 font-medium text-sm">Opening Balance<br/><span className="text-[10px] uppercase text-slate-400 font-bold">(Cumulative until start)</span></span>
                          <span className="text-indigo-600 dark:text-indigo-400 font-bold text-xl font-mono">₹{stats.details.openingBalance.toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between items-center bg-indigo-50 dark:bg-indigo-900/20 p-4 rounded-lg shadow-sm border border-indigo-200 dark:border-indigo-800">
-                         <span className="text-indigo-800 dark:text-indigo-300 font-bold text-sm">Closing Balance<br/><span className="text-[10px] uppercase opacity-70">(Stock + Net Profit/Loss)</span></span>
+                         <span className="text-indigo-800 dark:text-indigo-300 font-bold text-sm">Closing Balance<br/><span className="text-[10px] uppercase opacity-70 font-bold">(Cumulative until end)</span></span>
                          <span className="text-indigo-700 dark:text-indigo-400 font-bold text-2xl font-mono tracking-tight">₹{stats.details.closingBalance.toLocaleString()}</span>
                       </div>
                    </div>
@@ -1290,15 +1373,15 @@ const AccountantDashboard = () => {
              </div>
 
              <div className="bg-indigo-50 dark:bg-indigo-900/20 p-6 rounded-xl border border-indigo-100 dark:border-indigo-800">
-                <h3 className="text-sm font-bold text-indigo-800 dark:text-indigo-400 uppercase tracking-wider mb-4">Profit & Loss Summary (All Time)</h3>
+                <h3 className="text-sm font-bold text-indigo-800 dark:text-indigo-400 uppercase tracking-wider mb-4">Profit & Loss (Filtered Period)</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                    <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm">
                       <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Net Profit</span>
                       <span className="text-emerald-500 font-bold text-xl font-mono">₹{stats.details.totalProfit.toLocaleString()}</span>
                    </div>
                    <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm">
-                      <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Net Loss</span>
-                      <span className="text-rose-500 font-bold text-xl font-mono">₹{stats.details.totalLoss.toLocaleString()}</span>
+                      <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Total Margin</span>
+                      <span className="text-indigo-500 font-bold text-xl font-mono">₹{stats.details.totalProfit.toLocaleString()}</span>
                    </div>
                 </div>
              </div>
@@ -1360,9 +1443,10 @@ const AccountantDashboard = () => {
                             <th className="px-6 py-3">Month</th>
                             <th className="px-6 py-3">Opening Bal.</th>
                             <th className="px-6 py-3">Sales (Month)</th>
-                            <th className="px-6 py-3">Pur. (Month)</th>
+                            <th className="px-6 py-3">Purchases (Total)</th>
+                            <th className="px-6 py-3">Margin Profit</th>
                             <th className="px-6 py-3">Closing Bal.</th>
-                            <th className="px-6 py-3">Net Profit/Loss</th>
+                            <th className="px-6 py-3">Net Gain</th>
                          </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -1374,6 +1458,7 @@ const AccountantDashboard = () => {
                               <td className="px-6 py-4 font-mono text-slate-600 dark:text-slate-400">₹{m.opening.toLocaleString()}</td>
                               <td className="px-6 py-4 font-mono text-emerald-600">₹{m.sales.toLocaleString()}</td>
                               <td className="px-6 py-4 font-mono text-amber-600">₹{m.purchases.toLocaleString()}</td>
+                              <td className="px-6 py-4 font-mono text-amber-600">₹{m.profit.toLocaleString()}</td>
                               <td className="px-6 py-4 font-mono font-bold text-indigo-600 dark:text-indigo-400">₹{m.closing.toLocaleString()}</td>
                               <td className={`px-6 py-4 font-bold ${m.closing - m.opening >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
                                 {m.closing - m.opening >= 0 ? '+' : ''}₹{(m.closing - m.opening).toLocaleString()}
@@ -1383,7 +1468,7 @@ const AccountantDashboard = () => {
                       </tbody>
                    </table>
                 </div>
-                <p className="text-[10px] text-slate-400 mt-3 px-2 italic">* Balances calculated as: Stock Asset Value + Cumulative Cash Profit/Loss</p>
+                 <p className="text-[10px] text-slate-400 mt-3 px-2 italic">* Balances calculated as: Reference Stock (Apr 1) + Purchases - Cost of Sold Items</p>
              </div>
           </div>
         ) : null}
@@ -1625,23 +1710,17 @@ const AccountantDashboard = () => {
                <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row justify-between lg:items-center bg-slate-50/50 dark:bg-slate-800/50 gap-4">
                  <div className="flex items-center gap-4">
                    <h2 className="font-bold text-lg">Inventory Products</h2>
+                   <div className="bg-emerald-50 dark:bg-emerald-900/20 px-3 py-1 rounded-lg border border-emerald-100 dark:border-emerald-800">
+                      <span className="text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400 block">Total Active Stock Value</span>
+                      <span className="text-sm font-bold text-emerald-700 dark:text-emerald-300 font-mono">₹{parsedData.totalProductStockPrice.toLocaleString()}</span>
+                   </div>
                    <div className="flex bg-slate-200 dark:bg-slate-700 p-1 rounded-lg text-sm font-bold">
                      <button onClick={() => { setItemTab('Active'); setSelectedInventory([]); }} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Active' ? 'bg-white dark:bg-slate-800 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>Active Items</button>
                      <button onClick={() => { setItemTab('Inactive'); setSelectedInventory([]); }} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Inactive' ? 'bg-white dark:bg-slate-800 shadow-sm text-rose-600 dark:text-rose-400' : 'text-slate-500'}`}>Inactive (Sold)</button>
                    </div>
                  </div>
 
-                 <div className="flex flex-1 w-full lg:max-w-md gap-2">
-                    <div className="relative flex-1">
-                       <input 
-                         type="text" 
-                         placeholder="Search Item Name or IMEI..." 
-                         value={inventorySearch}
-                         onChange={e => setInventorySearch(e.target.value)}
-                         className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg pl-10 pr-4 py-2 outline-none focus:border-indigo-500 text-sm transition-all"
-                       />
-                       <span className="absolute left-3 top-2.5 text-slate-400 text-sm">🔍</span>
-                    </div>
+                 <div className="flex justify-end w-full lg:w-auto">
                     {selectedInventory.length > 0 && (
                       <button 
                         onClick={async () => {
@@ -1735,7 +1814,9 @@ const AccountantDashboard = () => {
                                <button 
                                  onClick={async () => {
                                    if (!confirm("Are you sure you want to delete this inventory record? This will also remove the original purchase data.")) return;
-                                   const { error } = await supabase.from('transactions').delete().eq('id', it.purchaseTxId);
+                                   const tid = itemTab === 'Active' ? it.purchaseTxId : it.saleTxId;
+                                   if (!tid) return alert("Error: Could not find transaction ID for this item.");
+                                   const { error } = await supabase.from('transactions').delete().eq('id', tid);
                                    if (error) alert("Error deleting: " + error.message);
                                    loadTransactions();
                                  }}
