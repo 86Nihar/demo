@@ -11,18 +11,12 @@ interface PaymentRecord {
   amount: number;
 }
 
-interface TransactionItem {
-  productName: string;
-  imeiNo: string;
-  purchasePrice: number;
-  sellingPrice: number; // 0 for purchases
-}
-
 interface TransactionRecord {
   id: string;
-  type: 'Sale' | 'Purchase' | 'Advance' | 'Cash In' | 'Cash Out';
+  type: 'Sale' | 'Purchase' | 'Advance' | 'Cash In' | 'Cash Out' | 'Opening Balance';
   partyName: string;
   date: string;
+  isExcluded?: boolean;
   
   // Legacy fields
   productName?: string;
@@ -37,6 +31,14 @@ interface TransactionRecord {
   paymentStatus: 'Paid' | 'Partial' | 'Pending';
   remark?: string;
   gift?: string;
+}
+
+interface TransactionItem {
+  productName: string;
+  imeiNo: string;
+  purchasePrice: number;
+  sellingPrice: number; // 0 for purchases
+  statusOverride?: 'ACTIVE' | 'INACTIVE';
 }
 
 const getTxItems = (tx: TransactionRecord): TransactionItem[] => {
@@ -100,6 +102,7 @@ const AccountantDashboard = () => {
         paymentStatus: row.payment_status,
         remark: row.remark,
         gift: row.gift,
+        isExcluded: row.is_excluded,
       }));
       setTransactions(mapped);
     }
@@ -124,7 +127,7 @@ const AccountantDashboard = () => {
   const [formRemark, setFormRemark] = useState('');
   const [formGift, setFormGift] = useState('');
   
-  const [formCashType, setFormCashType] = useState<'Cash In' | 'Cash Out'>('Cash In');
+  const [formCashType, setFormCashType] = useState<'Cash In' | 'Cash Out' | 'Opening Balance'>('Cash In');
   const [formGiverName, setFormGiverName] = useState('');
   const [formReceiverName, setFormReceiverName] = useState('');
   const [itemTab, setItemTab] = useState<'Active' | 'Inactive'>('Active');
@@ -241,6 +244,7 @@ const AccountantDashboard = () => {
        txData.items = [];
        txData.payment_records = [{ mode: 'Cash', amount: Number(payAmount) }];
        txData.payment_status = 'Paid';
+       txData.is_excluded = transactions.find(t => t.id === editingId)?.isExcluded || false;
     } else {
        let status: 'Paid' | 'Partial' | 'Pending' = 'Pending';
        if (totalPaid >= totalCost && totalCost > 0) status = 'Paid';
@@ -702,7 +706,15 @@ const AccountantDashboard = () => {
 
 
 
-    const sortedTx = [...transactions].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const sortedTx = [...transactions].sort((a,b) => {
+      const dateA = new Date(a.date).getTime();
+      const dateB = new Date(b.date).getTime();
+      if (dateA !== dateB) return dateA - dateB;
+      // If same date, Purchases come before Sales
+      if (a.type === 'Purchase' && b.type === 'Sale') return -1;
+      if (a.type === 'Sale' && b.type === 'Purchase') return 1;
+      return 0;
+    });
     
     // 1. Identify Day 1
     const day1Date = sortedTx.length > 0 ? sortedTx[0].date : null;
@@ -734,12 +746,12 @@ const AccountantDashboard = () => {
         return d < filterStartDate;
     };
 
-    // 2. Reference Point: Opening Balance (April 1, 2026) = ₹33,02,299
+    // 2. Reference Point: April 12, 2026 = ₹45,54,899 (Closing of April 11 handwritten records)
     // Formula: Closing = Opening + Purchases - (Sales - Profit)
     // NOTE: Sales - Profit = Cost of Sold items.
     // So: Closing = Opening + Purchases - CostOfSold
-    const REFERENCE_DATE = '2026-04-01';
-    const REFERENCE_OPENING_BALANCE = 3302299;
+    const REFERENCE_DATE = '2026-04-12';
+    const REFERENCE_OPENING_BALANCE = 4554899;
 
     // Accumulators for Balance
     let cumulativePurchasesBefore = 0;
@@ -768,9 +780,9 @@ const AccountantDashboard = () => {
       const isMatch = isFilterMatch(tx.date);
       const isBefore = isBeforeFilter(tx.date);
       
-      const txCashInTotal = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
+      const txCashInTotal = tx.isExcluded ? 0 : tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
 
-      // Balance Tracking (Since Reference Date)
+      // Financial Tracking (Only for records after reference date)
       if (tx.date >= REFERENCE_DATE) {
           const txCostOfSold = (tx.type === 'Sale') ? txPur : 0;
           const txPurchasedActual = (tx.type === 'Purchase') ? txPur : 0;
@@ -783,14 +795,22 @@ const AccountantDashboard = () => {
               periodPurchases += txPurchasedActual;
               periodCostOfSold += txCostOfSold;
           }
+
+          // Profit Calculation
+          if (tx.type === 'Sale') {
+             const currentTxProfit = txSell - txPur;
+             if (isBefore) cumulativeProfitBefore += currentTxProfit;
+             if (isMatch) periodProfit += currentTxProfit;
+          }
       }
 
-      // Inventory Tracking
+      // Inventory Tracking (Always run for all records to maintain stock)
       if (tx.type === 'Purchase') {
         getTxItems(tx).forEach(it => {
-            inventoryTracker.set(it.imeiNo, { ...it, status: 'ACTIVE', purchaseDate: tx.date, purchaseTxId: tx.id });
+            const status = it.statusOverride || 'ACTIVE';
+            inventoryTracker.set(it.imeiNo, { ...it, status, purchaseDate: tx.date, purchaseTxId: tx.id });
         });
-        if (isMatch) {
+        if (isMatch && tx.date >= REFERENCE_DATE) {
             filteredPurchasesTotal += txPur;
             filteredCashOut += txCashInTotal;
             if (isToday) todayPurchasesCount += getTxItems(tx).length;
@@ -798,9 +818,18 @@ const AccountantDashboard = () => {
       } else if (tx.type === 'Sale') {
         getTxItems(tx).forEach(it => {
             const existing = inventoryTracker.get(it.imeiNo) || {};
-            inventoryTracker.set(it.imeiNo, { ...existing, ...it, status: 'INACTIVE', soldDate: tx.date, saleTxId: tx.id, purchaseTxId: existing.purchaseTxId });
+            const status = it.statusOverride || 'INACTIVE';
+            inventoryTracker.set(it.imeiNo, { 
+              ...existing, 
+              ...it, 
+              status, 
+              soldDate: tx.date, 
+              saleTxId: tx.id, 
+              purchasePrice: existing.purchasePrice || it.purchasePrice,
+              purchaseTxId: existing.purchaseTxId 
+            });
         });
-        if (isMatch) {
+        if (isMatch && tx.date >= REFERENCE_DATE) {
             filteredSalesTotal += txSell;
             filteredCashIn += txCashInTotal;
             if (isToday) todaySalesCount += getTxItems(tx).length;
@@ -815,19 +844,14 @@ const AccountantDashboard = () => {
             }
         }
       } else if (tx.type === 'Cash In') {
-         if (isMatch) filteredCashIn += txCashInTotal;
+         if (isMatch && tx.date >= REFERENCE_DATE) filteredCashIn += txCashInTotal;
       } else if (tx.type === 'Cash Out') {
-         if (isMatch) filteredCashOut += txCashInTotal;
+         if (isMatch && tx.date >= REFERENCE_DATE) filteredCashOut += txCashInTotal;
       } else if (tx.type === 'Advance') {
          advancesMap.set(tx.id, tx);
-         if (isMatch) filteredCashIn += txCashInTotal;
-      }
-
-      // Profit Calculation (Strictly following: Profit = Sales - Cost of Sold Items)
-      if (tx.type === 'Sale') {
-         const currentTxProfit = txSell - txPur;
-         if (isBefore) cumulativeProfitBefore += currentTxProfit;
-         if (isMatch) periodProfit += currentTxProfit;
+         if (isMatch && tx.date >= REFERENCE_DATE) filteredCashIn += txCashInTotal;
+      } else if (tx.type === 'Opening Balance') {
+         if (isMatch && tx.date >= REFERENCE_DATE) filteredCashIn += txCashInTotal;
       }
     });
 
@@ -844,7 +868,7 @@ const AccountantDashboard = () => {
       cards: [
         { label: 'Total Sales (Filtered)', value: `₹${filteredSalesTotal.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
         { label: 'Total Purchases (Filtered)', value: `₹${filteredPurchasesTotal.toLocaleString()}`, icon: '📦', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
-        { label: 'Net Cash In Hand (Filtered)', value: `₹${(filteredCashIn - filteredCashOut).toLocaleString()}`, icon: '💵', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: 'Net Cash In Hand (Filtered)', value: `₹${Math.max(0, filteredCashIn - filteredCashOut).toLocaleString()}`, icon: '💵', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
         { label: 'Cash IN (Filtered)', value: `₹${filteredCashIn.toLocaleString()}`, icon: '⬇️', color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
         { label: 'Cash OUT (Filtered)', value: `₹${filteredCashOut.toLocaleString()}`, icon: '⬆️', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
         { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
@@ -858,7 +882,7 @@ const AccountantDashboard = () => {
          let runningBalance = REFERENCE_OPENING_BALANCE;
 
          allMonths.filter(m => m >= REFERENCE_DATE.slice(0, 7)).forEach(m => {
-            const monthTx = sortedTx.filter(t => t.date.startsWith(m));
+            const monthTx = sortedTx.filter(t => t.date.startsWith(m) && t.date >= REFERENCE_DATE);
             let mSalesValue = 0, mPurchasesValue = 0;
             let mProfit = 0, mCostOfSold = 0;
 
@@ -910,10 +934,10 @@ const AccountantDashboard = () => {
      let cash: any[] = [];
      let filteredAll = transactions.filter(t => applyDateFilter(t.date));
      filteredAll.forEach(tx => {
-        if (tx.type === 'Cash In' || tx.type === 'Cash Out') {
+        if (tx.type === 'Cash In' || tx.type === 'Cash Out' || tx.type === 'Opening Balance') {
            const parts = (tx.partyName || '|||').split('|||');
            const amt = tx.paymentRecords[0]?.amount || 0;
-           cash.push({ id: tx.id, date: tx.date, type: tx.type, giver: parts[0] || '-', receiver: parts[1] || '-', amount: amt, in: tx.type === 'Cash In', remark: tx.remark, rawTx: tx });
+           cash.push({ id: tx.id, date: tx.date, type: tx.type, giver: parts[0] || '-', receiver: parts[1] || '-', amount: amt, in: tx.type === 'Cash In' || tx.type === 'Opening Balance', remark: tx.remark, rawTx: tx });
         } else {
            const cashPaid = tx.paymentRecords.reduce((sum, p) => p.mode === 'Cash' ? sum + p.amount : sum, 0);
            if (cashPaid > 0) {
@@ -987,6 +1011,7 @@ const AccountantDashboard = () => {
                     <select value={formCashType} onChange={e => setFormCashType(e.target.value as any)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 cursor-pointer">
                       <option value="Cash In">Cash In (Receive)</option>
                       <option value="Cash Out">Cash Out (Send)</option>
+                      <option value="Opening Balance">☀️ Daily Opening Balance</option>
                     </select>
                   </div>
                   <div>
@@ -1619,7 +1644,7 @@ const AccountantDashboard = () => {
                     </span>
                   </div>
                   <p className="text-slate-500 dark:text-slate-400 text-sm font-medium mb-1">Net Amount</p>
-                  <p className="text-3xl font-bold tracking-tight text-indigo-600 dark:text-indigo-400">₹{(parsedData.details.filteredCashIn - parsedData.details.filteredCashOut).toLocaleString()}</p>
+                  <p className="text-3xl font-bold tracking-tight text-indigo-600 dark:text-indigo-400">₹{Math.max(0, parsedData.details.filteredCashIn - parsedData.details.filteredCashOut).toLocaleString()}</p>
                 </div>
             </section>
 
@@ -1669,7 +1694,28 @@ const AccountantDashboard = () => {
                          <td className="px-6 py-4 align-top pt-5 text-rose-500 font-mono font-bold">{!c.in ? `₹${c.amount}` : '-'}</td>
                          <td className="px-6 py-4 text-right align-top pt-5">
                            <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <button onClick={() => openEditModal(c.rawTx)} className="text-xs text-indigo-500 hover:underline bg-indigo-50 px-2 py-0.5 rounded">View / Edit</button>
+                               <button 
+                                 onClick={async () => {
+                                   if (!user) return alert("Please sign in.");
+                                   const newStatus = !c.rawTx.isExcluded;
+                                   const { error } = await supabase
+                                     .from('transactions')
+                                     .update({ is_excluded: newStatus })
+                                     .eq('id', c.id)
+                                     .eq('user_id', user.id);
+                                   
+                                   if (error) {
+                                      alert("Failed to update: " + error.message);
+                                   } else {
+                                      loadTransactions();
+                                   }
+                                 }} 
+                                 className={`text-[10px] font-bold px-2 py-1 rounded transition-colors ${c.rawTx.isExcluded ? 'bg-emerald-50 text-emerald-600 border border-emerald-200 hover:bg-emerald-100' : 'bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100'}`}
+                               >
+                                 {c.rawTx.isExcluded ? '➕ Add' : '➖ Remove'}
+                               </button>
+                               <button onClick={() => openEditModal(c.rawTx)} className="text-xs text-indigo-500 hover:underline bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 font-semibold">View / Edit</button>
+                               <button onClick={() => deleteTx(c.id)} className="text-xs text-rose-500 hover:underline bg-rose-50 px-2 py-0.5 rounded border border-rose-100 font-semibold">Delete</button>
                            </div>
                          </td>
                        </tr>
@@ -1801,6 +1847,36 @@ const AccountantDashboard = () => {
                          {itemTab === 'Inactive' && <td className="px-6 py-4 align-middle font-mono font-bold text-emerald-600">₹{(it.sellingPrice || it.sellPrice || 0).toLocaleString()}</td>}
                          <td className="px-6 py-4 text-right align-middle">
                             <div className="flex justify-end gap-2 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                               <button 
+                                 onClick={async () => {
+                                   if (!user) return alert("Please sign in.");
+                                   const tid = itemTab === 'Active' ? it.purchaseTxId : it.saleTxId;
+                                   const tx = transactions.find(t => t.id === tid);
+                                   if (!tx) return;
+                                   
+                                   const updatedItems = getTxItems(tx).map(item => {
+                                     if (item.imeiNo === it.imeiNo) {
+                                       return { ...item, statusOverride: itemTab === 'Active' ? 'INACTIVE' : 'ACTIVE' };
+                                     }
+                                     return item;
+                                   });
+                                   
+                                   const { error } = await supabase
+                                     .from('transactions')
+                                     .update({ items: updatedItems })
+                                     .eq('id', tid)
+                                     .eq('user_id', user.id);
+                                     
+                                   if (!error) {
+                                     loadTransactions();
+                                   } else {
+                                     alert("Error updating status: " + error.message);
+                                   }
+                                 }}
+                                 className={`text-[10px] font-bold px-3 py-1 rounded-md transition-all shadow-sm flex items-center gap-1 border ${itemTab === 'Active' ? 'text-rose-600 border-rose-200 hover:bg-rose-600 hover:text-white' : 'text-emerald-600 border-emerald-200 hover:bg-emerald-600 hover:text-white'}`}
+                               >
+                                 {itemTab === 'Active' ? '🔽 Inactive' : '🔼 Active'}
+                               </button>
                                <button 
                                  onClick={() => {
                                    const tid = itemTab === 'Active' ? it.purchaseTxId : it.saleTxId;
