@@ -483,11 +483,11 @@ const AccountantDashboard = () => {
           const advHeaders = ["Date", "Customer Info", "Model & IMEI", "Advance Amount", "Payments"];
           const advRows = advTx.map((tx) => {
              const custInfo = `${tx.partyName || ''}\n${tx.remark || ''}`;
-             const itemInfo = getTxItems(tx).map(it => `${it.productName}\nIMEI: ${it.imeiNo}`).join('\n\n');
+             const itemInfo = getTxItems(tx).map(it => `${it.productName}\nIMEI: ${it.imeiNo}\nPur. Price: Rs. ${it.purchasePrice}`).join('\n\n');
              const advAmt = getTxTotalSelling(tx);
              return [tx.date, custInfo, itemInfo, `Rs. ${advAmt}`, tx.paymentRecords.map(p => `${p.mode}: Rs. ${p.amount}`).join('\n')];
           });
-          autoTable(doc, { head: [advHeaders], body: advRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [245, 158, 11] } });
+          autoTable(doc, { head: [advHeaders], body: advRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, overflow: 'linebreak' }, headStyles: { fillColor: [245, 158, 11] }, columnStyles: { 1: { cellWidth: 50 }, 2: { cellWidth: 80 } } });
        }
 
     } else if (reportType === 'SalesPurchases') {
@@ -561,7 +561,7 @@ const AccountantDashboard = () => {
        if (salesTx.length > 0) {
          doc.setFontSize(14);
          doc.text("Sales Ledger", margin.left, currentY);
-         const sHeaders = ["No.", "Date", "Customer & Item", "Sell Price", "Profit", "Payments", "Status"];
+         const sHeaders = ["No.", "Date", "Customer & Item", "Purchase Price", "Sell Price", "Profit", "Payments", "Status"];
          const sRows = salesTx.map((tx, idx) => {
              const custItem = getTxItems(tx).map(it => {
                  let res = tx.partyName && tx.partyName !== '-' ? `${tx.partyName}\n` : '';
@@ -570,14 +570,29 @@ const AccountantDashboard = () => {
                  if (tx.remark) res += `\nMsg: ${tx.remark}`;
                  return res;
              }).join('\n\n');
-             const purPrice = getTxTotalPurchase(tx);
-             const sellPrice = getTxTotalSelling(tx);
+             const purPrices = getTxItems(tx).map(it => {
+                 let res = tx.partyName && tx.partyName !== '-' ? '\n' : '';
+                 res += `Rs. ${it.purchasePrice}`;
+                 if (tx.gift) res += '\n';
+                 if (tx.remark) res += '\n';
+                 return res;
+             }).join('\n\n');
+             const sellPrices = getTxItems(tx).map(it => {
+                 let res = tx.partyName && tx.partyName !== '-' ? '\n' : '';
+                 res += `Rs. ${it.sellingPrice || it.sellPrice || 0}`;
+                 if (tx.gift) res += '\n';
+                 if (tx.remark) res += '\n';
+                 return res;
+             }).join('\n\n');
+             
+             const purPriceTotal = getTxTotalPurchase(tx);
+             const sellPriceTotal = getTxTotalSelling(tx);
              return [
-                 idx + 1, tx.date, custItem, `Rs. ${sellPrice}`, `Rs. ${sellPrice - purPrice}`, 
+                 idx + 1, tx.date, custItem, purPrices, sellPrices, `Rs. ${sellPriceTotal - purPriceTotal}`, 
                  tx.paymentRecords.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n'), tx.paymentStatus
              ];
          });
-         autoTable(doc, { head: [sHeaders], body: sRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9, minCellHeight: 15, valign: 'top' }, headStyles: { fillColor: [79, 70, 229] } });
+         autoTable(doc, { head: [sHeaders], body: sRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, minCellHeight: 15, valign: 'top', overflow: 'linebreak' }, headStyles: { fillColor: [79, 70, 229] }, columnStyles: { 2: { cellWidth: 70 } } });
          currentY = (doc as any).lastAutoTable.finalY + 15;
        }
 
@@ -592,12 +607,18 @@ const AccountantDashboard = () => {
                  if (tx.remark) res += `\nMsg: ${tx.remark}`;
                  return res;
              }).join('\n\n');
+             const purPrices = getTxItems(tx).map(it => {
+                 let res = tx.partyName && tx.partyName !== '-' ? '\n' : '';
+                 res += `Rs. ${it.purchasePrice}`;
+                 if (tx.remark) res += '\n';
+                 return res;
+             }).join('\n\n');
              return [
-                 idx + 1, tx.date, custItem, `Rs. ${getTxTotalPurchase(tx)}`, 
+                 idx + 1, tx.date, custItem, purPrices, 
                  tx.paymentRecords.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n'), tx.paymentStatus
              ];
          });
-         autoTable(doc, { head: [pHeaders], body: pRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9, minCellHeight: 15, valign: 'top' }, headStyles: { fillColor: [16, 185, 129] } });
+         autoTable(doc, { head: [pHeaders], body: pRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, minCellHeight: 15, valign: 'top', overflow: 'linebreak' }, headStyles: { fillColor: [16, 185, 129] }, columnStyles: { 2: { cellWidth: 90 } } });
          currentY = (doc as any).lastAutoTable.finalY + 15;
        }
 
@@ -610,7 +631,7 @@ const AccountantDashboard = () => {
           pendingSalesDues.forEach(d => duesRows.push(["Sale (Receive)", d.name, `Rs. ${d.due}`]));
           pendingPurchaseDues.forEach(d => duesRows.push(["Purchase (Given)", d.name, `Rs. ${d.due}`]));
 
-          autoTable(doc, { head: [duesCol], body: duesRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
+          autoTable(doc, { head: [duesCol], body: duesRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, overflow: 'linebreak' }, headStyles: { fillColor: [239, 68, 68] } });
           currentY = (doc as any).lastAutoTable.finalY + 15;
        }
     } else if (reportType === 'CashReport') {
@@ -654,7 +675,7 @@ const AccountantDashboard = () => {
        doc.text(`Total Cash OUT (Credit): Rs. ${cOutTotal}`, margin.left, currentY + 6);
        doc.text(`Net Cash Balance: Rs. ${cInTotal - cOutTotal}`, margin.left, currentY + 12);
        
-       autoTable(doc, { head: [["Date", "Type", "Party / Details", "Debit (IN)", "Credit (OUT)"]], body: cRows, startY: currentY + 18, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [59, 130, 246] } });
+       autoTable(doc, { head: [["Date", "Type", "Party / Details", "Debit (IN)", "Credit (OUT)"]], body: cRows, startY: currentY + 18, margin, styles: { cellWidth: 'auto', fontSize: 9, overflow: 'linebreak' }, headStyles: { fillColor: [59, 130, 246] }, columnStyles: { 2: { cellWidth: 100 } } });
     } else if (reportType === 'ItemsReport') {
        doc.setFontSize(14);
        doc.text(`Inventory Items Ledger`, margin.left, currentY);
@@ -673,19 +694,41 @@ const AccountantDashboard = () => {
            doc.setFontSize(12);
            doc.text(`Active Options`, margin.left, currentY);
            const aRows = activeDateFiltered.map(it => [it.purchaseDate, it.productName, it.imeiNo, `Rs. ${it.purchasePrice}`]);
-           autoTable(doc, { head: [["Purchase Date", "Product Name", "IMEI No", "Purchase Price"]], body: aRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [16, 185, 129] } });
+           autoTable(doc, { head: [["Purchase Date", "Product Name", "IMEI No", "Purchase Price"]], body: aRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, overflow: 'linebreak' }, headStyles: { fillColor: [16, 185, 129] }, columnStyles: { 1: { cellWidth: 80 } } });
            currentY = (doc as any).lastAutoTable.finalY + 10;
        }
        if (inactiveDateFiltered.length > 0) {
            doc.setFontSize(12);
            doc.text(`Inactive / Sold Options`, margin.left, currentY);
            const iRows = inactiveDateFiltered.map(it => [it.soldDate || it.purchaseDate, it.productName, it.imeiNo, `Rs. ${it.purchasePrice}`, `Rs. ${it.sellPrice}`]);
-           autoTable(doc, { head: [["Sold Date", "Product Name", "IMEI No", "Purchase Price", "Selling Price"]], body: iRows, startY: currentY + 4, margin, styles: { cellWidth: 'wrap', fontSize: 9 }, headStyles: { fillColor: [239, 68, 68] } });
+           autoTable(doc, { head: [["Sold Date", "Product Name", "IMEI No", "Purchase Price", "Selling Price"]], body: iRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, overflow: 'linebreak' }, headStyles: { fillColor: [239, 68, 68] }, columnStyles: { 1: { cellWidth: 80 } } });
        }
     }
     
     setReportModalOpen(false);
-    doc.save(`Store_Report_${reportType}_${reportFilter === 'All' ? 'All_Time' : reportTitleStr.replace(/[^a-zA-Z0-9-]/g, '_')}.pdf`);
+
+    const formatDDMMYYYY = (ds: string) => {
+      if (!ds) return "";
+      const [y, m, d] = ds.split('-');
+      return `${d}/${m}/${y}`;
+    };
+
+    let periodStr = "";
+    if (reportFilter === 'Today') periodStr = formatDDMMYYYY(new Date().toISOString().split('T')[0]);
+    else if (reportFilter === 'Yesterday') {
+      const yest = new Date(); yest.setDate(yest.getDate() - 1);
+      periodStr = formatDDMMYYYY(yest.toISOString().split('T')[0]);
+    }
+    else if (reportFilter === 'SpecificDate') periodStr = formatDDMMYYYY(reportSpecificDate);
+    else if (reportFilter === 'Month') periodStr = reportMonth; // e.g. 2026-04
+    else periodStr = "All-Time";
+
+    const reportTypeName = reportType === 'SalesPurchases' ? 'profit-loss-report' : 
+                          reportType === 'AllDetails' ? 'all-details-report' :
+                          reportType === 'CashReport' ? 'cash-ledger-report' : 'inventory-report';
+
+    const reportFileName = `${periodStr}-${reportTypeName}`.replace(/\//g, '-');
+    doc.save(`${reportFileName}.pdf`);
   };
 
   const deleteTx = async (id: string) => {
@@ -864,6 +907,14 @@ const AccountantDashboard = () => {
     const inactiveProducts = Array.from(inventoryTracker.values()).filter(p => p.status === 'INACTIVE');
     const totalProductStockPrice = activeProducts.reduce((sum, p) => sum + p.purchasePrice, 0);
 
+    const activeBrandCounts = activeProducts.reduce((acc, p) => {
+      const brand = p.productName.trim().split(/\s+|-/)[0].toUpperCase();
+      if (brand) {
+        acc[brand] = (acc[brand] || 0) + 1;
+      }
+      return acc;
+    }, {} as Record<string, number>);
+
     return {
       cards: [
         { label: 'Total Sales (Filtered)', value: `₹${filteredSalesTotal.toLocaleString()}`, icon: '💰', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
@@ -874,7 +925,7 @@ const AccountantDashboard = () => {
         { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
       ],
       details: { totalDebit: 0, totalCredit: 0, openingBalance, closingBalance, totalProfit: periodProfit, totalLoss: 0, filteredCashIn, filteredCashOut, filteredSalesTotal, filteredPurchasesTotal },
-      activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries()),
+      activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries()), activeBrandCounts,
       monthlyData: (() => {
          const allMonths = Array.from(new Set(sortedTx.map(t => t.date.slice(0, 7)))).sort();
          const data: any[] = [];
@@ -1764,33 +1815,56 @@ const AccountantDashboard = () => {
                      <button onClick={() => { setItemTab('Active'); setSelectedInventory([]); }} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Active' ? 'bg-white dark:bg-slate-800 shadow-sm text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}`}>Active Items</button>
                      <button onClick={() => { setItemTab('Inactive'); setSelectedInventory([]); }} className={`px-4 py-1.5 rounded-md transition ${itemTab === 'Inactive' ? 'bg-white dark:bg-slate-800 shadow-sm text-rose-600 dark:text-rose-400' : 'text-slate-500'}`}>Inactive (Sold)</button>
                    </div>
-                 </div>
+                </div>
 
-                 <div className="flex justify-end w-full lg:w-auto">
-                    {selectedInventory.length > 0 && (
-                      <button 
-                        onClick={async () => {
-                           if (!confirm(`CAUTION: You are about to delete ${selectedInventory.length} inventory records. This action will also delete their original purchase transactions. Proceed?`)) return;
-                           const toDelete = (itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems)
-                             .filter(it => selectedInventory.includes(it.imeiNo))
-                             .map(it => it.purchaseTxId)
-                             .filter((v, i, a) => a.indexOf(v) === i);
-                           
-                           for (const tid of toDelete) {
-                              await supabase.from('transactions').delete().eq('id', tid);
-                           }
-                           loadTransactions();
-                           setSelectedInventory([]);
-                        }}
-                        className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold px-4 py-2 rounded-lg transition-all shadow-sm flex items-center gap-2 whitespace-nowrap"
-                      >
-                        🗑️ Delete ({selectedInventory.length})
-                      </button>
-                    )}
-                 </div>
-               </div>
-               
-               <div className="overflow-x-auto min-h-[300px]">
+                <div className="flex justify-end w-full lg:w-auto">
+                   {selectedInventory.length > 0 && (
+                     <button 
+                       onClick={async () => {
+                          if (!confirm(`CAUTION: You are about to delete ${selectedInventory.length} inventory records. This action will also delete their original purchase transactions. Proceed?`)) return;
+                          const toDelete = (itemTab === 'Active' ? displayData.activeItems : displayData.inactiveItems)
+                            .filter(it => selectedInventory.includes(it.imeiNo))
+                            .map(it => it.purchaseTxId)
+                            .filter((v, i, a) => a.indexOf(v) === i);
+                          
+                          for (const tid of toDelete) {
+                             await supabase.from('transactions').delete().eq('id', tid);
+                          }
+                          loadTransactions();
+                          setSelectedInventory([]);
+                       }}
+                       className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold px-4 py-2 rounded-lg transition-all shadow-sm flex items-center gap-2 whitespace-nowrap"
+                     >
+                       🗑️ Delete ({selectedInventory.length})
+                     </button>
+                   )}
+                </div>
+              </div>
+
+              {itemTab === 'Active' && (
+                <div className="flex flex-wrap gap-2 px-5 py-3 border-b border-slate-100 dark:border-slate-800 bg-slate-50/30 dark:bg-slate-900/10">
+                  {(() => {
+                    const brandCounts: Record<string, number> = {};
+                    displayData.activeItems.forEach(it => {
+                      const brand = it.productName.trim().split(/\s+|-/)[0].toUpperCase().replace(/^[^A-Z0-9]+|[^A-Z0-9]+$/g, '');
+                      if (brand) brandCounts[brand] = (brandCounts[brand] || 0) + 1;
+                    });
+                    const entries = Object.entries(brandCounts);
+                    return entries.length === 0 ? (
+                      <span className="text-xs text-slate-400 italic">No brand data for current filters</span>
+                    ) : (
+                      entries.map(([brand, count]) => (
+                        <div key={brand} className="flex items-center gap-1.5 px-3 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full shadow-sm hover:ring-2 hover:ring-indigo-500 transition-all cursor-default">
+                          <span className="text-[10px] font-bold text-slate-500 uppercase">{brand}</span>
+                          <span className="w-5 h-5 flex items-center justify-center bg-indigo-600 text-white rounded-full text-[10px] font-black">{count}</span>
+                        </div>
+                      ))
+                    );
+                  })()}
+                </div>
+              )}
+                
+                <div className="overflow-x-auto min-h-[300px]">
                <table className="w-full text-left whitespace-nowrap">
                  <thead>
                    <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-[10px] uppercase tracking-widest font-bold">
