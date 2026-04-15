@@ -579,7 +579,7 @@ const AccountantDashboard = () => {
              }).join('\n\n');
              const sellPrices = getTxItems(tx).map(it => {
                  let res = tx.partyName && tx.partyName !== '-' ? '\n' : '';
-                 res += `Rs. ${it.sellingPrice || it.sellPrice || 0}`;
+                 res += `Rs. ${it.sellingPrice || (it as any).sellPrice || 0}`;
                  if (tx.gift) res += '\n';
                  if (tx.remark) res += '\n';
                  return res;
@@ -700,7 +700,7 @@ const AccountantDashboard = () => {
        if (inactiveDateFiltered.length > 0) {
            doc.setFontSize(12);
            doc.text(`Inactive / Sold Options`, margin.left, currentY);
-           const iRows = inactiveDateFiltered.map(it => [it.soldDate || it.purchaseDate, it.productName, it.imeiNo, `Rs. ${it.purchasePrice}`, `Rs. ${it.sellPrice}`]);
+           const iRows = inactiveDateFiltered.map(it => [it.soldDate || it.purchaseDate, it.productName, it.imeiNo, `Rs. ${it.purchasePrice}`, `Rs. ${it.sellingPrice || (it as any).sellPrice || 0}`]);
            autoTable(doc, { head: [["Sold Date", "Product Name", "IMEI No", "Purchase Price", "Selling Price"]], body: iRows, startY: currentY + 4, margin, styles: { cellWidth: 'auto', fontSize: 9, overflow: 'linebreak' }, headStyles: { fillColor: [239, 68, 68] }, columnStyles: { 1: { cellWidth: 80 } } });
        }
     }
@@ -1918,7 +1918,7 @@ const AccountantDashboard = () => {
                             </div>
                          </td>
                          <td className="px-6 py-4 align-middle font-mono font-bold text-slate-600 dark:text-slate-400">₹{it.purchasePrice.toLocaleString()}</td>
-                         {itemTab === 'Inactive' && <td className="px-6 py-4 align-middle font-mono font-bold text-emerald-600">₹{(it.sellingPrice || it.sellPrice || 0).toLocaleString()}</td>}
+                         {itemTab === 'Inactive' && <td className="px-6 py-4 align-middle font-mono font-bold text-emerald-600">₹{(it.sellingPrice || (it as any).sellPrice || 0).toLocaleString()}</td>}
                          <td className="px-6 py-4 text-right align-middle">
                             <div className="flex justify-end gap-2 sm:opacity-0 group-hover:opacity-100 transition-opacity">
                                <button 
