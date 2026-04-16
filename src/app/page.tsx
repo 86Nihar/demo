@@ -465,6 +465,7 @@ const AccountantDashboard = () => {
        doc.text(`Total Income (Cash In): Rs. ${parsedData.details.filteredCashIn}`, margin.left, currentY + 24);
        doc.text(`Total Expense (Cash Out): Rs. ${parsedData.details.filteredCashOut}`, margin.left, currentY + 30);
        doc.text(`Total Generated Profit: Rs. ${parsedData.details.totalProfit}`, margin.left, currentY + 36);
+       doc.text(`Total Loss: Rs. ${parsedData.details.totalLoss}`, margin.left, currentY + 42);
        
        let rightX = 140;
        doc.text(`Total Gifts Tracked:`, rightX, currentY);
@@ -474,7 +475,7 @@ const AccountantDashboard = () => {
            gY += 6;
        });
        
-       currentY = Math.max(currentY + 42, gY) + 10;
+       currentY = Math.max(currentY + 48, gY) + 10;
        
        const advTx = filteredTx.filter(t => t.type === 'Advance');
        if (advTx.length > 0) {
@@ -561,7 +562,7 @@ const AccountantDashboard = () => {
        if (salesTx.length > 0) {
          doc.setFontSize(14);
          doc.text("Sales Ledger", margin.left, currentY);
-         const sHeaders = ["No.", "Date", "Customer & Item", "Purchase Price", "Sell Price", "Profit", "Payments", "Status"];
+         const sHeaders = ["No.", "Date", "Customer & Item", "Purchase Price", "Sell Price", "Profit", "Loss", "Payments", "Status"];
          const sRows = salesTx.map((tx, idx) => {
              const custItem = getTxItems(tx).map(it => {
                  let res = tx.partyName && tx.partyName !== '-' ? `${tx.partyName}\n` : '';
@@ -587,8 +588,12 @@ const AccountantDashboard = () => {
              
              const purPriceTotal = getTxTotalPurchase(tx);
              const sellPriceTotal = getTxTotalSelling(tx);
+             const diff = sellPriceTotal - purPriceTotal;
+             const profitVal = diff > 0 ? `Rs. ${diff}` : '-';
+             const lossVal = diff < 0 ? `Rs. ${Math.abs(diff)}` : '-';
+
              return [
-                 idx + 1, tx.date, custItem, purPrices, sellPrices, `Rs. ${sellPriceTotal - purPriceTotal}`, 
+                 idx + 1, tx.date, custItem, purPrices, sellPrices, profitVal, lossVal, 
                  tx.paymentRecords.map(p => `${p.mode}:\nRs. ${p.amount}`).join('\n\n'), tx.paymentStatus
              ];
          });
@@ -805,6 +810,7 @@ const AccountantDashboard = () => {
     // Accumulators for Profit & Others
     let cumulativeProfitBefore = 0;
     let periodProfit = 0;
+    let periodLoss = 0;
 
     // Tracker for stats cards
     let filteredSalesTotal = 0, filteredPurchasesTotal = 0;
@@ -839,11 +845,13 @@ const AccountantDashboard = () => {
               periodCostOfSold += txCostOfSold;
           }
 
-          // Profit Calculation
           if (tx.type === 'Sale') {
              const currentTxProfit = txSell - txPur;
              if (isBefore) cumulativeProfitBefore += currentTxProfit;
-             if (isMatch) periodProfit += currentTxProfit;
+             if (isMatch) {
+                if (currentTxProfit > 0) periodProfit += currentTxProfit;
+                else if (currentTxProfit < 0) periodLoss += Math.abs(currentTxProfit);
+             }
           }
       }
 
@@ -924,7 +932,7 @@ const AccountantDashboard = () => {
         { label: 'Cash OUT (Filtered)', value: `₹${filteredCashOut.toLocaleString()}`, icon: '⬆️', color: 'text-rose-500', bg: 'bg-rose-50 dark:bg-rose-900/20' },
         { label: 'Active Inventory Stock', value: activeProducts.length.toString(), icon: '🏷️', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
       ],
-      details: { totalDebit: 0, totalCredit: 0, openingBalance, closingBalance, totalProfit: periodProfit, totalLoss: 0, filteredCashIn, filteredCashOut, filteredSalesTotal, filteredPurchasesTotal },
+      details: { totalDebit: 0, totalCredit: 0, openingBalance, closingBalance, totalProfit: periodProfit, totalLoss: periodLoss, filteredCashIn, filteredCashOut, filteredSalesTotal, filteredPurchasesTotal },
       activeProducts, inactiveProducts, totalProductStockPrice, activeAdvances: Array.from(advancesMap.values()), gifts: Array.from(giftTracker.entries()), modelsSold: Array.from(modelTracker.entries()), activeBrandCounts,
       monthlyData: (() => {
          const allMonths = Array.from(new Set(sortedTx.map(t => t.date.slice(0, 7)))).sort();
@@ -1456,8 +1464,8 @@ const AccountantDashboard = () => {
                       <span className="text-emerald-500 font-bold text-xl font-mono">₹{stats.details.totalProfit.toLocaleString()}</span>
                    </div>
                    <div className="flex justify-between items-center bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm">
-                      <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Total Margin</span>
-                      <span className="text-indigo-500 font-bold text-xl font-mono">₹{stats.details.totalProfit.toLocaleString()}</span>
+                      <span className="font-medium text-sm text-slate-600 dark:text-slate-300">Net Loss</span>
+                      <span className="text-rose-500 font-bold text-xl font-mono">₹{stats.details.totalLoss.toLocaleString()}</span>
                    </div>
                 </div>
              </div>
