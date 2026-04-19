@@ -174,11 +174,13 @@ const AccountantDashboard = () => {
 
   const updateFormItem = (index: number, field: string, value: string | number) => {
     const newItems = [...formItems];
+    const prevValue = newItems[index][field as keyof typeof newItems[0]];
     newItems[index] = { ...newItems[index], [field]: value };
     setFormItems(newItems);
 
-    // Advance Detection Logic
-    if (modalType === 'Sale' && field === 'imeiNo' && value) {
+    // IMEI Lookup Logic (Sale only)
+    if (modalType === 'Sale' && field === 'imeiNo' && value && value !== prevValue) {
+       // 1. Advance Detection
        const matchingAdv = parsedData.activeAdvances.find(adv => 
           getTxItems(adv).some(it => it.imeiNo === value)
        );
@@ -189,20 +191,27 @@ const AccountantDashboard = () => {
           const advPaid = matchingAdv.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
 
           if (confirm(`Found active Advance for this IMEI!\nCustomer: ${matchingAdv.partyName}\nAdvance Amount: ₹${advPaid}\n\nDo you want to add this amount to current Sale payments?`)) {
-             // Add payment record
              setFormPayments(prev => [...prev, { mode: 'Cash', amount: advPaid }]);
-             // Fill customer name
              setFormPartyName(matchingAdv.partyName);
-             // Optionally fill product name
              if (advItem) {
-                newItems[index].productName = advItem.productName;
-                newItems[index].purchasePrice = advItem.purchasePrice;
-                setFormItems([...newItems]);
+                const updatedItems = [...newItems];
+                updatedItems[index].productName = advItem.productName;
+                updatedItems[index].purchasePrice = advItem.purchasePrice;
+                setFormItems(updatedItems);
              }
-             // Store the advance ID to delete on save
              (window as any)._pendingAdvanceId = matchingAdv.id;
              alert("Advance added to payments. The old advance record will be removed upon saving this sale.");
+             return;
           }
+       }
+
+       // 2. Inventory Autocomplete (If no advance found, or user declined advance)
+       const matchingProduct = parsedData.activeProducts.find(p => p.imeiNo === value);
+       if (matchingProduct) {
+          const updatedItems = [...newItems];
+          updatedItems[index].productName = matchingProduct.productName;
+          updatedItems[index].purchasePrice = matchingProduct.purchasePrice;
+          setFormItems(updatedItems);
        }
     }
   };
@@ -1612,9 +1621,9 @@ const AccountantDashboard = () => {
                                ))}
                              </div>
                              {(tx.remark || tx.gift) && (
-                               <div className="mt-1 flex flex-col gap-1">
-                                 {tx.gift && <span className="text-xs text-pink-600 bg-pink-100 dark:bg-pink-900/30 px-2 py-1 rounded-md max-w-max">🎁 Gift: {tx.gift}</span>}
-                                 {tx.remark && <span className="text-xs italic text-slate-500 dark:text-slate-400">"{tx.remark}"</span>}
+                               <div className="mt-1 flex flex-col gap-1 max-w-[300px]">
+                                 {tx.gift && <span className="text-xs text-pink-600 bg-pink-100 dark:bg-pink-900/30 px-2 py-1 rounded-md max-w-max whitespace-normal break-words">🎁 Gift: {tx.gift}</span>}
+                                 {tx.remark && <span className="text-xs italic text-slate-500 dark:text-slate-400 whitespace-normal break-words">"{tx.remark}"</span>}
                                </div>
                              )}
                           </div>
@@ -1746,7 +1755,7 @@ const AccountantDashboard = () => {
                             <div className="flex flex-col gap-1 text-xs mt-1">
                                <div className="font-semibold text-slate-700 dark:text-slate-300">From: <span className="font-bold uppercase text-slate-500">{c.giver}</span></div>
                                <div className="font-semibold text-slate-700 dark:text-slate-300">To: <span className="font-bold uppercase text-slate-500">{c.receiver}</span></div>
-                               {c.remark && <span className="text-[10px] text-slate-400 mt-1">"{c.remark}"</span>}
+                               {c.remark && <span className="text-[10px] text-slate-400 mt-1 whitespace-normal break-words max-w-[200px]">"{c.remark}"</span>}
                             </div>
                          </td>
                          <td className="px-6 py-4 align-top pt-5 text-emerald-600 font-mono font-bold">{c.in ? `₹${c.amount}` : '-'}</td>
