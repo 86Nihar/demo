@@ -59,9 +59,9 @@ export default function AuthPage() {
         {/* Logo / Brand */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-tr from-indigo-600 to-violet-500 rounded-2xl shadow-lg shadow-indigo-500/30 mb-4">
-            <span className="text-2xl font-black text-white">E</span>
+            <span className="text-2xl font-black text-white">AI</span>
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">EZY BUY SELL STORE</h1>
+          <h1 className="text-2xl font-bold text-white tracking-tight">Powered by Amvidis India</h1>
           <p className="text-slate-400 text-sm mt-1">Smart Complete Management System</p>
         </div>
 

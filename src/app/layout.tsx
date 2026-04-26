@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "EZY BUY SELL STORE | Smart Complete Management",
+  title: "Amvidis India | Smart Complete Management",
   description: "Track inventory, sales, purchases, and complete ledger management.",
 };
 

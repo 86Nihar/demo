@@ -13,7 +13,7 @@ interface PaymentRecord {
 
 interface TransactionRecord {
   id: string;
-  type: 'Sale' | 'Purchase' | 'Advance' | 'Cash In' | 'Cash Out' | 'Opening Balance';
+  type: 'Sale' | 'Purchase' | 'Advance' | 'Cash In' | 'Cash Out' | 'Opening Balance' | 'Customer' | 'Vendor';
   partyName: string;
   date: string;
   isExcluded?: boolean;
@@ -39,10 +39,28 @@ interface TransactionItem {
   purchasePrice: number;
   sellingPrice: number; // 0 for purchases
   statusOverride?: 'ACTIVE' | 'INACTIVE';
+  
+  // Contact details
+  contactType?: 'Customer' | 'Vendor';
+  phone?: string;
+  email?: string;
+  address?: string;
+  address1?: string;
+  address2?: string;
+  country?: string;
+  state?: string;
+  pin?: string;
+  fax?: string;
+  idProofType?: string;
+  idProofNo?: string;
+  gstNo?: string;
+  category?: string;
 }
 
 const getTxItems = (tx: TransactionRecord): TransactionItem[] => {
-  if (tx.items && tx.items.length > 0) return tx.items;
+  if (tx.items && tx.items.length > 0) {
+    return tx.items.filter(it => it.productName !== 'DISCOUNT_APPLIED' && it.productName !== 'DOC_TYPE');
+  }
   return [{
     productName: tx.productName || '',
     imeiNo: tx.imeiNo || '',
@@ -51,11 +69,28 @@ const getTxItems = (tx: TransactionRecord): TransactionItem[] => {
   }];
 };
 
+const getTxDiscount = (tx: TransactionRecord): number => {
+  if (tx.items && tx.items.length > 0) {
+    const discountItem = tx.items.find(it => it.productName === 'DISCOUNT_APPLIED');
+    if (discountItem) return (discountItem as any).discountValue || 0;
+  }
+  return 0;
+};
+
+const getTxDocType = (tx: TransactionRecord): 'Bill' | 'Tax Invoice' | 'None' => {
+  if (tx.items && tx.items.length > 0) {
+    const docItem = tx.items.find(it => it.productName === 'DOC_TYPE');
+    if (docItem) return docItem.imeiNo as any;
+  }
+  return 'None';
+};
+
 const getTxTotalPurchase = (tx: TransactionRecord) => getTxItems(tx).reduce((sum, item) => sum + item.purchasePrice, 0);
 const getTxTotalSelling = (tx: TransactionRecord) => getTxItems(tx).reduce((sum, item) => sum + item.sellingPrice, 0);
 
 const AccountantDashboard = () => {
   const [activeTab, setActiveTab] = useState('Dashboard');
+  const [isBillingMenuOpen, setIsBillingMenuOpen] = useState(false);
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [user, setUser] = useState<User | null>(null);
@@ -119,7 +154,7 @@ const AccountantDashboard = () => {
   };
 
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalType, setModalType] = useState<'Sale' | 'Purchase' | 'Advance' | 'CashEntry'>('Sale');
+  const [modalType, setModalType] = useState<'Sale' | 'Purchase' | 'Advance' | 'CashEntry' | 'Customer' | 'Vendor'>('Sale');
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
@@ -130,6 +165,19 @@ const AccountantDashboard = () => {
   const [formCashType, setFormCashType] = useState<'Cash In' | 'Cash Out' | 'Opening Balance'>('Cash In');
   const [formGiverName, setFormGiverName] = useState('');
   const [formReceiverName, setFormReceiverName] = useState('');
+  const [formContactPhone, setFormContactPhone] = useState('');
+  const [formContactEmail, setFormContactEmail] = useState('');
+  const [formContactAddress1, setFormContactAddress1] = useState('');
+  const [formContactAddress2, setFormContactAddress2] = useState('');
+  const [formContactCountry, setFormContactCountry] = useState('India');
+  const [formContactState, setFormContactState] = useState('');
+  const [formContactPin, setFormContactPin] = useState('');
+  const [formContactFax, setFormContactFax] = useState('');
+  const [formContactIdType, setFormContactIdType] = useState('None');
+  const [viewingParty, setViewingParty] = useState<any>(null);
+  const [formContactIdNo, setFormContactIdNo] = useState('');
+  const [formContactGst, setFormContactGst] = useState('');
+  const [formContactCategory, setFormContactCategory] = useState('');
   const [itemTab, setItemTab] = useState<'Active' | 'Inactive'>('Active');
   const [searchQuery, setSearchQuery] = useState('');
   const [showMobileMenu, setShowMobileMenu] = useState(false);
@@ -141,6 +189,11 @@ const AccountantDashboard = () => {
     purchasePrice: '' as number | '',
     sellingPrice: '' as number | ''
   }]);
+
+  const [formDiscount, setFormDiscount] = useState<number | ''>('');
+  const [checkoutStep, setCheckoutStep] = useState<'Form' | 'Bill' | 'Invoice'>('Form');
+  const [pendingTxData, setPendingTxData] = useState<any>(null);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
 
   const [formPayments, setFormPayments] = useState<PaymentRecord[]>([]);
   const [payAmount, setPayAmount] = useState<number | ''>('');
@@ -160,7 +213,7 @@ const AccountantDashboard = () => {
 
   const totalCost = formItems.reduce((sum, item) => {
      return sum + ((modalType === 'Sale' || modalType === 'Advance') ? Number(item.sellingPrice || 0) : Number(item.purchasePrice || 0));
-  }, 0);
+  }, 0) - (modalType === 'Sale' ? Number(formDiscount || 0) : 0);
   const totalPaid = formPayments.reduce((sum, p) => sum + p.amount, 0);
   const remainingAmount = Math.max(0, totalCost - totalPaid);
 
@@ -211,6 +264,7 @@ const AccountantDashboard = () => {
           const updatedItems = [...newItems];
           updatedItems[index].productName = matchingProduct.productName;
           updatedItems[index].purchasePrice = matchingProduct.purchasePrice;
+          updatedItems[index].sellingPrice = matchingProduct.sellingPrice || '';
           setFormItems(updatedItems);
        }
     }
@@ -239,6 +293,24 @@ const AccountantDashboard = () => {
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
+
+    if (modalType === 'Customer' || modalType === 'Vendor') {
+
+      if (formContactPhone && !/^\d+$/.test(formContactPhone.trim())) {
+        alert('Mobile Number must contain only numbers. Text is not allowed.');
+        return;
+      }
+      
+      if (formContactPin && !/^\d+$/.test(formContactPin.trim())) {
+        alert('PIN Code must contain only numbers. Text is not allowed.');
+        return;
+      }
+
+      if (formContactIdType === 'Aadhar' && formContactIdNo && !/^\d+$/.test(formContactIdNo.trim())) {
+        alert('Aadhar Number must contain only numbers. Text is not allowed.');
+        return;
+      }
+    }
     
     let txData: any = {
       user_id: user.id,
@@ -254,6 +326,41 @@ const AccountantDashboard = () => {
        txData.payment_records = [{ mode: 'Cash', amount: Number(payAmount) }];
        txData.payment_status = 'Paid';
        txData.is_excluded = transactions.find(t => t.id === editingId)?.isExcluded || false;
+    } else if (modalType === 'Customer' || modalType === 'Vendor') {
+       if (formContactEmail && formContactEmail.trim() !== '') {
+          const duplicate = transactions.find(t => 
+             t.type === modalType && 
+             t.id !== editingId && 
+             getTxItems(t)[0]?.email?.toLowerCase() === formContactEmail.trim().toLowerCase()
+          );
+          if (duplicate) {
+             alert(`This Email (${formContactEmail}) is already registered to ${duplicate.type}: ${duplicate.partyName}.\nPlease use a different email ID.`);
+             return;
+          }
+       }
+       txData.type = modalType;
+       txData.party_name = formPartyName;
+       txData.items = [{
+         productName: 'Contact Record',
+         imeiNo: '-',
+         purchasePrice: 0,
+         sellingPrice: 0,
+         contactType: modalType as 'Customer' | 'Vendor',
+         phone: formContactPhone,
+         email: formContactEmail,
+         address1: formContactAddress1,
+         address2: formContactAddress2,
+         country: formContactCountry,
+         state: formContactState,
+         pin: formContactPin,
+         fax: formContactFax,
+         idProofType: formContactIdType,
+         idProofNo: formContactIdNo,
+         gstNo: formContactGst,
+         category: formContactCategory
+       }];
+       txData.payment_records = [];
+       txData.payment_status = 'Paid';
     } else {
        let status: 'Paid' | 'Partial' | 'Pending' = 'Pending';
        if (totalPaid >= totalCost && totalCost > 0) status = 'Paid';
@@ -263,8 +370,19 @@ const AccountantDashboard = () => {
          productName: it.productName,
          imeiNo: it.imeiNo,
          purchasePrice: Number(it.purchasePrice) || 0,
-         sellingPrice: modalType === 'Sale' ? (Number(it.sellingPrice) || 0) : 0
+         sellingPrice: Number(it.sellingPrice) || 0
        }));
+
+       const actualDiscount = Number(formDiscount) || 0;
+       if (actualDiscount > 0) {
+         mappedItems.push({
+           productName: 'DISCOUNT_APPLIED',
+           imeiNo: '-',
+           purchasePrice: 0,
+           sellingPrice: 0,
+           discountValue: actualDiscount
+         } as any);
+       }
 
        txData.type = modalType;
        txData.party_name = formPartyName;
@@ -277,6 +395,26 @@ const AccountantDashboard = () => {
       txData.id = editingId;
     }
 
+    if ((modalType === 'Sale' || modalType === 'Purchase') && checkoutStep === 'Form') {
+       setPendingTxData(txData);
+       setCheckoutStep('Bill');
+       return;
+    }
+
+    await executeSaveTransaction(txData, modalType === 'Sale' ? (checkoutStep === 'Bill' ? 'Bill' : (checkoutStep === 'Invoice' ? 'Tax Invoice' : 'None')) : 'None');
+  };
+
+  const executeSaveTransaction = async (txData: any, docType: 'Bill' | 'Tax Invoice' | 'None' = 'None') => {
+    if (docType !== 'None' && txData.type === 'Sale') {
+      const newItems = [...(txData.items || [])];
+      const existingIdx = newItems.findIndex(it => it.productName === 'DOC_TYPE');
+      if (existingIdx >= 0) {
+        newItems[existingIdx] = { ...newItems[existingIdx], imeiNo: docType };
+      } else {
+        newItems.push({ productName: 'DOC_TYPE', imeiNo: docType, purchasePrice: 0, sellingPrice: 0 });
+      }
+      txData.items = newItems;
+    }
     const { error } = await supabase
       .from('transactions')
       .upsert(txData);
@@ -297,81 +435,6 @@ const AccountantDashboard = () => {
     }
   };
 
-  const handleBulkImport = async () => {
-      try {
-          if (!user) return alert("Must be signed in");
-          const btn = document.getElementById('import-btn');
-          if (btn) btn.innerText = "Importing...";
-          
-          const res = await fetch('/api/inventory/import');
-          if (!res.ok) throw new Error(await res.text());
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
-          
-          const products = data.products;
-          
-          let newTxCount = 0;
-          let skippedCount = 0;
-          
-          const existingImeis = new Set<string>();
-          const existingUnknowns = new Set<string>();
-          
-          transactions.forEach(tx => {
-             getTxItems(tx).forEach(it => {
-                 if (!it.imeiNo.startsWith("UNKNOWN")) existingImeis.add(it.imeiNo);
-                 else existingUnknowns.add(`${it.productName}-${it.purchasePrice}`);
-             });
-          });
-
-          for (const p of products) {
-             let exists = false;
-             if (!p.imeiNo.startsWith("UNKNOWN")) {
-                 exists = existingImeis.has(p.imeiNo);
-             } else {
-                 exists = existingUnknowns.has(`${p.name}-${p.purchasePrice}`);
-             }
-
-             if (exists) {
-                 skippedCount++;
-                 continue;
-             }
-
-             let txData = {
-                 user_id: user.id,
-                 date: p.isoDate,
-                 type: 'Purchase',
-                 party_name: 'System Import',
-                 remark: 'Imported from prodect.txt',
-                 gift: '',
-                 payment_status: 'Pending',
-                 payment_records: [],
-                 items: [{
-                     productName: p.name,
-                     imeiNo: p.imeiNo,
-                     purchasePrice: p.purchasePrice,
-                     sellingPrice: 0
-                 }]
-             };
-
-             const { error } = await supabase.from('transactions').insert([txData]);
-             if (error) {
-                 console.error("Import error", error);
-             } else {
-                 newTxCount++;
-                 if (!p.imeiNo.startsWith("UNKNOWN")) existingImeis.add(p.imeiNo);
-                 else existingUnknowns.add(`${p.name}-${p.purchasePrice}`);
-             }
-          }
-
-          loadTransactions();
-          alert(`Import complete! Added ${newTxCount} products. Skipped ${skippedCount} existing products.`);
-          if (btn) btn.innerText = "IMPORT TXT";
-      } catch (err: any) {
-          alert('Failed to import: ' + err.message);
-          const btn = document.getElementById('import-btn');
-          if (btn) btn.innerText = "IMPORT TXT";
-      }
-  };
 
   const resetForm = () => {
     setFormPartyName('');
@@ -380,15 +443,31 @@ const AccountantDashboard = () => {
     setFormRemark('');
     setFormGift('');
     setFormItems([{ productName: '', imeiNo: '', purchasePrice: '', sellingPrice: '' }]);
+    setFormDiscount('');
+    setCheckoutStep('Form');
+    setPendingTxData(null);
+    setPdfPreviewUrl(null);
     setFormPayments([]);
     setPayAmount('');
     setEditingId(null);
     setFormCashType('Cash In');
+    setFormContactPhone('');
+    setFormContactEmail('');
+    setFormContactAddress1('');
+    setFormContactAddress2('');
+    setFormContactCountry('India');
+    setFormContactState('');
+    setFormContactPin('');
+    setFormContactFax('');
+    setFormContactIdType('None');
+    setFormContactIdNo('');
+    setFormContactGst('');
+    setFormContactCategory('');
   };
 
-  const openModal = (type: 'Sale' | 'Purchase' | 'Advance' | 'CashEntry') => {
+  const openModal = (type: 'Sale' | 'Purchase' | 'Advance' | 'CashEntry' | 'Customer' | 'Vendor') => {
     resetForm();
-    setModalType(type);
+    setModalType(type as any);
     setIsModalOpen(true);
   };
 
@@ -408,6 +487,26 @@ const AccountantDashboard = () => {
        setIsModalOpen(true);
        return;
     }
+    
+    if (tx.type === 'Customer' || tx.type === 'Vendor') {
+        setModalType(tx.type as any);
+        setFormPartyName(tx.partyName || '');
+        const item = getTxItems(tx)[0] || {} as any;
+        setFormContactPhone(item.phone || '');
+        setFormContactEmail(item.email || '');
+        setFormContactAddress1(item.address1 || '');
+        setFormContactAddress2(item.address2 || '');
+        setFormContactCountry(item.country || 'India');
+        setFormContactState(item.state || '');
+        setFormContactPin(item.pin || '');
+        setFormContactFax(item.fax || '');
+        setFormContactIdType(item.idProofType || 'None');
+        setFormContactIdNo(item.idProofNo || '');
+        setFormContactGst(item.gstNo || '');
+        setFormContactCategory(item.category || '');
+        setIsModalOpen(true);
+        return;
+    }
 
     setModalType(tx.type as any);
     setFormPartyName(tx.partyName || '');
@@ -423,6 +522,177 @@ const AccountantDashboard = () => {
     setFormPayments([...tx.paymentRecords]);
     setIsModalOpen(true);
   };
+
+  const handleView = (tx: TransactionRecord) => {
+    const docType = getTxDocType(tx);
+    if (tx.type === 'Sale') {
+       setCheckoutStep(docType === 'Tax Invoice' ? 'Invoice' : 'Bill');
+    } else {
+       setCheckoutStep('Bill'); 
+    }
+    setPendingTxData(tx);
+    setModalType(tx.type as any);
+    setIsModalOpen(true);
+  };
+  const exportInvoice = async (rawTx: any, mode: 'Invoice' | 'Bill', action: 'download' | 'print' | 'preview' = 'download') => {
+    const tx: TransactionRecord = {
+      ...rawTx,
+      partyName: rawTx.partyName || rawTx.party_name,
+      paymentRecords: rawTx.paymentRecords || rawTx.payment_records || [],
+      paymentStatus: rawTx.paymentStatus || rawTx.payment_status || 'Pending'
+    };
+    const doc = new jsPDF({ orientation: 'portrait', format: 'a4' });
+    try {
+      const img = new window.Image();
+      img.src = '/logo.png';
+      await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+      const aspect = img.width / img.height;
+      doc.addImage(img, 'PNG', 14, 10, 12 * aspect, 12);
+    } catch (e) {
+      console.warn("Could not load logo for PDF", e);
+    }
+
+    doc.setFontSize(22);
+    doc.setTextColor(30, 41, 59);
+    doc.text(mode === 'Invoice' ? 'TAX INVOICE' : 'BILL', 196, 20, { align: 'right' });
+    
+    doc.setFontSize(10);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Powered by Amvidis India', 196, 26, { align: 'right' });
+    doc.text(`Date: ${tx.date}`, 196, 32, { align: 'right' });
+    doc.text(`Invoice No: INV-${tx.id.substring(0,6).toUpperCase()}`, 196, 38, { align: 'right' });
+
+    // Fetch customer details if they exist in DB
+    const customerTx = transactions.find(t => t.type === 'Customer' && t.partyName?.toLowerCase() === tx.partyName?.toLowerCase());
+    const cItem = customerTx ? getTxItems(customerTx)[0] : null;
+
+    doc.setFontSize(12);
+    doc.setTextColor(30, 41, 59);
+    doc.setFont('helvetica', 'bold');
+    doc.text('Billed To:', 14, 50);
+    
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.text(tx.partyName || 'Walk-in Customer', 14, 57);
+    
+    let yPos = 63;
+    if (cItem) {
+       if (cItem.phone) { doc.text(`Phone: ${cItem.phone}`, 14, yPos); yPos += 6; }
+       if (cItem.email) { doc.text(`Email: ${cItem.email}`, 14, yPos); yPos += 6; }
+       const address = [cItem.address1, cItem.address2, cItem.state, cItem.country, cItem.pin].filter(Boolean).join(', ');
+       if (address) {
+          const lines = doc.splitTextToSize(`Address: ${address}`, 80);
+          doc.text(lines, 14, yPos);
+          yPos += lines.length * 6;
+       }
+       if (mode === 'Invoice' && cItem.gstNo) {
+          doc.setFont('helvetica', 'bold');
+          doc.text(`GSTIN: ${cItem.gstNo}`, 14, yPos);
+          doc.setFont('helvetica', 'normal');
+       }
+    }
+
+    // Table Data
+    const items = getTxItems(tx);
+    const isPurchase = tx.type === 'Purchase';
+    const tableData = items.map((it, idx) => [
+      idx + 1,
+      it.productName || '-',
+      it.imeiNo || '-',
+      1,
+      `Rs. ${Number(isPurchase ? it.purchasePrice : it.sellingPrice || 0).toLocaleString()}`,
+      `Rs. ${Number(isPurchase ? it.purchasePrice : it.sellingPrice || 0).toLocaleString()}`
+    ]);
+
+
+    const totalAmount = isPurchase ? getTxTotalPurchase(tx) : getTxTotalSelling(tx);
+    const totalPaid = tx.paymentRecords.reduce((sum, p) => sum + p.amount, 0);
+    const totalDue = totalAmount - getTxDiscount(tx) - totalPaid;
+
+    autoTable(doc, {
+      startY: Math.max(yPos + 10, 80),
+      head: [['#', 'Item Description', 'IMEI/Serial', 'Qty', 'Rate', 'Amount']],
+      body: tableData,
+      theme: 'grid',
+      headStyles: { fillColor: [79, 70, 229], textColor: [255, 255, 255], fontStyle: 'bold' },
+      styles: { fontSize: 10, cellPadding: 5 },
+      columnStyles: {
+        0: { cellWidth: 10, halign: 'center' },
+        3: { halign: 'center' },
+        4: { halign: 'right' },
+        5: { halign: 'right' }
+      }
+    });
+
+    const finalY = (doc as any).lastAutoTable.finalY + 10;
+    
+    doc.setFontSize(10);
+    doc.text('Payment Status: ', 120, finalY);
+    doc.setFont('helvetica', 'bold');
+    // Simplified color logic
+    if (tx.paymentStatus === 'Paid') {
+       doc.setTextColor(16, 185, 129); // emerald
+    } else if (tx.paymentStatus === 'Pending') {
+       doc.setTextColor(244, 63, 94); // rose
+    } else {
+       doc.setTextColor(245, 158, 11); // amber
+    }
+    doc.text(tx.paymentStatus, 150, finalY);
+    
+    doc.setTextColor(30, 41, 59);
+    doc.text('Subtotal:', 120, finalY + 8);
+    doc.text(`Rs. ${totalAmount.toLocaleString()}`, 196, finalY + 8, { align: 'right' });
+    
+    const discount = getTxDiscount(tx);
+    let nextY = finalY + 16;
+    
+    if (discount > 0) {
+       doc.text('Discount:', 120, nextY);
+       doc.setTextColor(16, 185, 129); // green for discount
+       doc.text(`- Rs. ${discount.toLocaleString()}`, 196, nextY, { align: 'right' });
+       doc.setTextColor(30, 41, 59);
+       nextY += 8;
+       
+       doc.setFont('helvetica', 'bold');
+       doc.text('Grand Total:', 120, nextY);
+       doc.text(`Rs. ${(totalAmount - discount).toLocaleString()}`, 196, nextY, { align: 'right' });
+       doc.setFont('helvetica', 'normal');
+       nextY += 8;
+    }
+
+    doc.text('Amount Paid:', 120, nextY);
+    doc.text(`Rs. ${totalPaid.toLocaleString()}`, 196, nextY, { align: 'right' });
+
+    if (totalDue > 0 && tx.type !== 'Purchase') {
+       doc.text('Balance Due:', 120, nextY + 8);
+       doc.setTextColor(225, 29, 72);
+       doc.text(`Rs. ${totalDue.toLocaleString()}`, 196, nextY + 8, { align: 'right' });
+    }
+
+    doc.setTextColor(148, 163, 184);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.text('Thank you for your business!', 105, 280, { align: 'center' });
+
+    if (action === 'preview') {
+      return doc.output('datauristring');
+    } else if (action === 'print') {
+      doc.autoPrint();
+      window.open(doc.output('bloburl'), '_blank');
+    } else {
+      doc.save(`${mode}_${tx.partyName || 'Customer'}_${tx.date}.pdf`);
+    }
+  };
+
+  useEffect(() => {
+    if ((checkoutStep === 'Bill' || checkoutStep === 'Invoice') && pendingTxData) {
+       exportInvoice({ ...pendingTxData, id: pendingTxData.id || 'DRAFT', date: pendingTxData.date }, checkoutStep === 'Bill' ? 'Bill' : 'Invoice', 'preview').then(url => {
+          setPdfPreviewUrl(url as string);
+       });
+    } else {
+       setPdfPreviewUrl(null);
+    }
+  }, [checkoutStep, pendingTxData]);
 
   const exportPDF = async () => {
     const doc = new jsPDF({ orientation: 'landscape', format: 'a4' });
@@ -455,12 +725,14 @@ const AccountantDashboard = () => {
       const img = new window.Image();
       img.src = '/logo.png';
       await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
-      doc.addImage(img, 'PNG', margin.left, margin.top - 10, 20, 20);
+      const aspect = img.width / img.height;
+      const logoW = 10 * aspect;
+      doc.addImage(img, 'PNG', margin.left, margin.top - 10, logoW, 10);
       doc.setFontSize(18);
-      doc.text(`EZY BUY SELL STORE - ${reportTitleStr}`, margin.left + 25, margin.top + 2);
+      doc.text(`Amvidis India - ${reportTitleStr}`, margin.left + logoW + 5, margin.top - 1);
     } catch (e) {
       doc.setFontSize(18);
-      doc.text(`EZY BUY SELL STORE - ${reportTitleStr}`, margin.left, margin.top);
+      doc.text(`Amvidis India - ${reportTitleStr}`, margin.left, margin.top);
     }
 
     let currentY = margin.top + 15;
@@ -808,7 +1080,7 @@ const AccountantDashboard = () => {
     // NOTE: Sales - Profit = Cost of Sold items.
     // So: Closing = Opening + Purchases - CostOfSold
     const REFERENCE_DATE = '2026-04-12';
-    const REFERENCE_OPENING_BALANCE = 4554899;
+    const REFERENCE_OPENING_BALANCE = 0;
 
     // Accumulators for Balance
     let cumulativePurchasesBefore = 0;
@@ -995,7 +1267,13 @@ const AccountantDashboard = () => {
 
      let list = activeTab === 'Sales' ? transactions.filter(t => t.type === 'Sale') : 
                 activeTab === 'Purchases' ? transactions.filter(t => t.type === 'Purchase') : 
-                activeTab === 'Advances' ? parsedData.activeAdvances : transactions;
+                activeTab === 'Advances' ? parsedData.activeAdvances : 
+                activeTab === 'Customers' ? transactions.filter(t => t.type === 'Customer') :
+                activeTab === 'Vendors' ? transactions.filter(t => t.type === 'Vendor') :
+                activeTab === 'Bills' ? transactions.filter(t => t.type === 'Sale' && getTxDocType(t) === 'Bill') :
+                 activeTab === 'Tax Invoices' ? transactions.filter(t => t.type === 'Sale' && getTxDocType(t) === 'Tax Invoice') :
+                 activeTab === 'Billing & Invoices' ? transactions.filter(t => t.type === 'Sale') :
+                transactions;
      
      list = list.filter(t => applyDateFilter(t.date));
 
@@ -1058,7 +1336,7 @@ const AccountantDashboard = () => {
       
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
-          <div className="bg-white dark:bg-[#1e293b] rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-700 my-8 max-h-[90vh] flex flex-col">
+          <div className={`bg-white dark:bg-[#1e293b] rounded-2xl w-full ${checkoutStep === 'Form' ? 'max-w-2xl' : 'max-w-5xl'} shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-700 my-8 max-h-[95vh] flex flex-col transition-all duration-300`}>
             <div className={`p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center shrink-0 ${modalType === 'Sale' ? 'bg-indigo-50 dark:bg-indigo-900/20' : 'bg-emerald-50 dark:bg-emerald-900/20'}`}>
               <h3 className="font-bold text-lg flex items-center gap-2">
                 {modalType === 'Sale' ? '🏷️' : '📦'} {editingId ? 'Edit' : 'New'} {modalType} Record
@@ -1066,9 +1344,99 @@ const AccountantDashboard = () => {
               <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer text-xl">✕</button>
             </div>
             
-            <form onSubmit={handleAddTransaction} className="p-6 overflow-y-auto flex-1 space-y-6">
+            {checkoutStep === 'Form' ? (
+              <form onSubmit={handleAddTransaction} className="p-6 overflow-y-auto flex-1 space-y-6">
               
-              {modalType === 'CashEntry' ? (
+              {modalType === 'Customer' || modalType === 'Vendor' ? (
+                <div className="space-y-4 pb-4 border-b border-slate-100 dark:border-slate-800">
+                  <div>
+                    <label className="block text-xs font-semibold mb-1 text-slate-500">{modalType === 'Customer' ? 'Customer' : 'Vendor'} Name</label>
+                    <input required type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder="Full Name" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold mb-1 text-slate-500">Phone No</label>
+                      <input type="text" value={formContactPhone} onChange={e => setFormContactPhone(e.target.value)} placeholder="Phone Number" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold mb-1 text-slate-500">Email</label>
+                      <input type="email" value={formContactEmail} onChange={e => setFormContactEmail(e.target.value)} placeholder="Email Address" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold mb-1 text-slate-500">ID Proof Type</label>
+                      <select value={formContactIdType} onChange={e => setFormContactIdType(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 cursor-pointer">
+                        <option value="None">Select ID Proof</option>
+                        <option value="Aadhar">Aadhar No</option>
+                        <option value="PAN">PAN No</option>
+                        <option value="Passport">Passport</option>
+                      </select>
+                    </div>
+                    {formContactIdType !== 'None' && (
+                      <div>
+                        <label className="block text-xs font-semibold mb-1 text-slate-500">{formContactIdType} Number</label>
+                        <input type="text" value={formContactIdNo} onChange={e => setFormContactIdNo(e.target.value)} placeholder={`Enter ${formContactIdType}`} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                      </div>
+                    )}
+                    <div className="md:col-span-2 space-y-4 pt-2">
+                       <label className="block text-xs font-semibold text-slate-500 border-b border-slate-100 dark:border-slate-800 pb-2">Address Details</label>
+                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                         <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Address 1</label>
+                            <input type="text" value={formContactAddress1} onChange={e => setFormContactAddress1(e.target.value)} placeholder="Building, Street" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                         </div>
+                         <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Address 2</label>
+                            <input type="text" value={formContactAddress2} onChange={e => setFormContactAddress2(e.target.value)} placeholder="Locality, Area" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                         </div>
+                         <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Country</label>
+                            <input type="text" value={formContactCountry} onChange={e => setFormContactCountry(e.target.value)} placeholder="Country" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                         </div>
+                         <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">State</label>
+                            <input type="text" value={formContactState} onChange={e => setFormContactState(e.target.value)} placeholder="State" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                         </div>
+                         <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">PIN Code</label>
+                            <input type="text" value={formContactPin} onChange={e => setFormContactPin(e.target.value)} placeholder="PIN Code" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                         </div>
+                         <div>
+                            <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Fax No</label>
+                            <input type="text" value={formContactFax} onChange={e => setFormContactFax(e.target.value)} placeholder="Fax No" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                         </div>
+                       </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold mb-1 text-slate-500">Category</label>
+                      <select value={formContactCategory} onChange={e => {
+                         const cat = e.target.value;
+                         setFormContactCategory(cat);
+                         if (cat !== 'Business' && cat !== 'Registered Business') setFormContactGst('');
+                      }} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 cursor-pointer">
+                        {modalType === 'Customer' ? (
+                          <>
+                            <option value="">Select Category</option>
+                            <option value="Consumer">Consumer</option>
+                            <option value="Business">Business</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="">Select Category</option>
+                            <option value="Unregistered Business">Unregistered Business</option>
+                            <option value="Registered Business">Registered Business</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                    {(formContactCategory === 'Business' || formContactCategory === 'Registered Business') && (
+                      <div className="animate-in fade-in zoom-in duration-300">
+                        <label className="block text-xs font-semibold mb-1 text-slate-500">GST No (Required)</label>
+                        <input required type="text" value={formContactGst} onChange={e => setFormContactGst(e.target.value)} placeholder="GST Number" className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : modalType === 'CashEntry' ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
                   <div>
                     <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
@@ -1101,18 +1469,21 @@ const AccountantDashboard = () => {
                     <label className="block text-xs font-semibold mb-1 text-slate-500">Date</label>
                     <input required type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500" />
                   </div>
-                  {remainingAmount > 0 && (
-                    <div className="animate-in fade-in zoom-in duration-300">
-                       <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Sale' ? 'Customer Name (Due)' : modalType === 'Advance' ? 'Customer Name' : 'Vendor Name (Due)'}</label>
-                       <input type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Advance' || modalType === 'Sale' ? 'John Doe' : 'Samsung Dist.'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" />
-                    </div>
-                  )}
+                  <div className="animate-in fade-in zoom-in duration-300 relative">
+                     <label className="block text-xs font-bold mb-1 text-rose-500">{modalType === 'Purchase' ? 'Vendor Name' : 'Customer Name'}</label>
+                     <input required type="text" value={formPartyName} onChange={e => setFormPartyName(e.target.value)} placeholder={`e.g. ${modalType === 'Purchase' ? 'Samsung Dist.' : 'John Doe'}`} className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500" list="partyNames" />
+                     <datalist id="partyNames">
+                       {Array.from(new Set(transactions.filter(t => t.type === (modalType === 'Purchase' ? 'Vendor' : 'Customer') && t.partyName).map(t => t.partyName))).map(name => (
+                         <option key={name as string} value={name as string} />
+                       ))}
+                     </datalist>
+                  </div>
                 </div>
               )}
-
-              {modalType !== 'CashEntry' && (
+              
+              {(modalType === 'Sale' || modalType === 'Purchase' || modalType === 'Advance') && (
                 <>
-                  <div>
+                <div>
                     <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider flex justify-between items-center">
                       Product Details
                       <button type="button" onClick={addFormItem} className="text-xs bg-slate-100 dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1 rounded hover:opacity-80 transition cursor-pointer">
@@ -1140,10 +1511,10 @@ const AccountantDashboard = () => {
                               <label className="block text-xs font-semibold mb-1 text-slate-500">Purchase Price (₹)</label>
                               <input required type="number" value={item.purchasePrice} onChange={e => updateFormItem(idx, 'purchasePrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
                             </div>
-                            {modalType === 'Sale' && (
+                            {(modalType === 'Sale' || modalType === 'Purchase') && (
                               <div>
-                                <label className="block text-xs font-semibold mb-1 text-slate-500">Selling Price (₹)</label>
-                                <input required type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50/30 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
+                                <label className="block text-xs font-semibold mb-1 text-slate-500">{modalType === 'Sale' ? 'Selling Price (₹)' : 'Target Selling Price (₹)'}</label>
+                                <input required={modalType === 'Sale'} type="number" value={item.sellingPrice} onChange={e => updateFormItem(idx, 'sellingPrice', Number(e.target.value))} placeholder="0.00" className="w-full bg-indigo-50/30 dark:bg-indigo-900/10 border border-indigo-200 dark:border-indigo-700 rounded-lg px-4 py-2 outline-none focus:border-indigo-500 font-mono" />
                               </div>
                             )}
                             {modalType === 'Advance' && (
@@ -1156,6 +1527,14 @@ const AccountantDashboard = () => {
                         </div>
                       ))}
                     </div>
+                    {modalType === 'Sale' && (
+                      <div className="mt-4 flex justify-end">
+                        <div className="w-1/2 md:w-1/3">
+                          <label className="block text-xs font-bold mb-1 text-rose-500">Discount (₹)</label>
+                          <input type="number" value={formDiscount} onChange={e => setFormDiscount(Number(e.target.value) || '')} placeholder="0.00" className="w-full bg-rose-50 dark:bg-rose-900/10 border border-rose-200 dark:border-rose-700 rounded-lg px-4 py-2 outline-none focus:border-rose-500 font-mono text-rose-600 dark:text-rose-400 font-bold" />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="pt-4 border-t border-slate-100 dark:border-slate-800">
@@ -1228,7 +1607,54 @@ const AccountantDashboard = () => {
                    {editingId ? 'Update' : 'Save'} {modalType} Record
                  </button>
                </div>
-             </form>
+               </form>
+            ) : checkoutStep === 'Bill' || checkoutStep === 'Invoice' ? (
+              <div className="p-6 overflow-y-auto flex-1 flex flex-col items-center justify-center space-y-6">
+                 <h2 className="text-2xl font-bold flex items-center gap-2">
+                    {checkoutStep === 'Bill' ? '🧾 Bill' : '📄 Tax Invoice'} Preview
+                 </h2>
+                 <p className="text-slate-500 dark:text-slate-400 text-center max-w-sm">
+                   Your {modalType} has been drafted. Would you like to share or print the {checkoutStep === 'Bill' ? 'Bill' : 'Invoice'} before finalizing?
+                 </p>
+                 
+                 {pdfPreviewUrl ? (
+                    <div className="w-full max-w-4xl min-h-[75vh] border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden bg-slate-50 dark:bg-slate-900 shadow-inner flex-shrink-0">
+                       <iframe src={pdfPreviewUrl} className="w-full h-full min-h-[75vh]" title="PDF Preview" />
+                    </div>
+                 ) : (
+                    <div className="w-full max-w-4xl min-h-[75vh] border border-slate-200 dark:border-slate-700 rounded-xl flex items-center justify-center bg-slate-50 dark:bg-slate-900 text-slate-400 shadow-inner flex-shrink-0">
+                       Generating Preview...
+                    </div>
+                 )}
+
+                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-3xl mt-4">
+                    <a href={`mailto:?subject=${checkoutStep} for ${pendingTxData?.party_name}&body=Please find the details for your ${checkoutStep}.`} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl font-bold transition">
+                      📧 Email
+                    </a>
+                    <a href={`https://wa.me/?text=Hello, your ${checkoutStep} for ${pendingTxData?.party_name} is ready. Total: Rs. ${pendingTxData?.items?.reduce((s:any,i:any)=>s+(modalType==='Sale'?i.sellingPrice:i.purchasePrice),0) - getTxDiscount(pendingTxData)}`} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 py-3 bg-[#25D366]/10 text-[#25D366] hover:bg-[#25D366]/20 rounded-xl font-bold transition">
+                      💬 WhatsApp
+                    </a>
+                    <button onClick={() => exportInvoice({ ...pendingTxData, id: pendingTxData.id || 'DRAFT', date: pendingTxData.date }, checkoutStep, 'download')} className="flex items-center justify-center gap-2 py-3 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-400 rounded-xl font-bold transition cursor-pointer">
+                      ⬇️ Download PDF
+                    </button>
+                    <button onClick={() => exportInvoice({ ...pendingTxData, id: pendingTxData.id || 'DRAFT', date: pendingTxData.date }, checkoutStep, 'print')} className="flex items-center justify-center gap-2 py-3 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-900/30 dark:text-indigo-400 rounded-xl font-bold transition cursor-pointer">
+                      🖨️ Print Document
+                    </button>
+                 </div>
+
+                 <div className="w-full h-px bg-slate-200 dark:bg-slate-800 my-4"></div>
+
+                 {checkoutStep === 'Bill' && modalType === 'Sale' ? (
+                   <button onClick={() => setCheckoutStep('Invoice')} className="w-full max-w-sm py-4 bg-slate-900 dark:bg-indigo-600 text-white rounded-xl font-bold shadow-lg hover:opacity-90 transition cursor-pointer">
+                      Proceed to Tax Invoice ➡️
+                   </button>
+                 ) : (
+                   <button onClick={() => executeSaveTransaction(pendingTxData, checkoutStep === 'Bill' ? 'Bill' : 'Tax Invoice')} className="w-full max-w-sm py-4 bg-emerald-600 text-white rounded-xl font-bold shadow-lg hover:opacity-90 transition cursor-pointer">
+                      Finalize & Save {modalType} ✅
+                   </button>
+                 )}
+              </div>
+            ) : null}
           </div>
         </div>
       )}
@@ -1239,15 +1665,15 @@ const AccountantDashboard = () => {
       {/* Sidebar */}
       <aside className={`w-64 bg-white dark:bg-[#1e293b] border-r border-slate-200 dark:border-slate-800 flex flex-col fixed inset-y-0 left-0 z-40 transform transition-transform duration-300 lg:relative lg:translate-x-0 ${showMobileMenu ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:flex'}`}>
         <div className="p-6 border-b border-slate-100 dark:border-slate-800">
-          <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="EZY Logo" className="w-12 h-12 object-contain rounded-full shadow-sm bg-white" onError={(e) => {
+          <div className="flex flex-col items-start gap-2">
+            <img src="/logo.png" alt="Amvidis India Logo" className="w-32 h-12 object-contain" onError={(e) => {
                (e.target as HTMLImageElement).style.display = 'none';
                (e.target as HTMLImageElement).nextElementSibling!.classList.remove('hidden');
             }} />
             <div className="hidden w-12 h-10 bg-gradient-to-tr from-indigo-600 to-violet-500 rounded-xl flex flex-shrink-0 items-center justify-center text-white font-bold text-sm shadow-lg">
-              EZY
+              AI
             </div>
-            <span className="font-bold text-lg tracking-tight leading-tight">BUY SELL STORE</span>
+            <span className="font-extrabold text-lg text-slate-700 dark:text-slate-300 tracking-tight leading-tight mt-1">Powered by Amvidis India</span>
           </div>
         </div>
         
@@ -1268,25 +1694,45 @@ const AccountantDashboard = () => {
                💵 CASH IN/OUT
              </button>
            </div>
-           <button id="import-btn" onClick={handleBulkImport} className="w-full text-xs font-bold bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white py-2 rounded-lg transition-colors cursor-pointer mt-1">
-             ⚡ IMPORT TXT
-           </button>
+           <div className="flex gap-2 mt-2">
+             <button onClick={() => openModal('Customer')} className="flex-1 text-xs font-bold bg-indigo-500 hover:bg-indigo-600 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+               👤 CUSTOMERS
+             </button>
+             <button onClick={() => openModal('Vendor')} className="flex-1 text-xs font-bold bg-slate-700 hover:bg-slate-800 text-white py-2 rounded-lg transition-colors cursor-pointer text-center shadow-sm">
+               🏢 VENDORS
+             </button>
+           </div>
         </div>
 
-        <nav className="flex-1 px-4 space-y-1 mt-2">
-          {['Dashboard', 'Sales', 'Purchases', 'Advances', 'Cash Tracker', 'Inventory', 'All Details'].map((item) => (
-            <button
-              key={item}
-              onClick={() => { setActiveTab(item); setShowMobileMenu(false); }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
-                activeTab === item 
-                  ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-medium' 
-                  : 'hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
-              }`}
-            >
-              <span>{item}</span>
-            </button>
-          ))}
+        <nav className="flex-1 px-4 space-y-1 mt-2 mb-4 overflow-y-auto">
+          {[
+            { id: 'Dashboard', icon: '📊' },
+            { id: 'Sales', icon: '🛍️' },
+            { id: 'Purchases', icon: '🛒' },
+            { id: 'Advances', icon: '⭐' },
+            { id: 'Cash Tracker', icon: '💵' },
+            { id: 'Inventory', icon: '📦' },
+            { id: 'Customers', icon: '👥' },
+            { id: 'Vendors', icon: '🏢' },
+            { id: 'Billing & Invoices', icon: '🧾' },
+            { id: 'All Details', icon: '📈' }
+          ].map((item) => {
+
+            return (
+              <button
+                key={item.id}
+                onClick={() => { setActiveTab(item.id); setShowMobileMenu(false); }}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 cursor-pointer ${
+                  activeTab === item.id 
+                    ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-medium' 
+                    : 'hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                <span>{item.icon}</span>
+                <span>{item.id}</span>
+              </button>
+            );
+          })}
           <div className="pt-4 mt-4 border-t border-slate-100 dark:border-slate-800">
             <button
               onClick={handleSignOut}
@@ -1566,7 +2012,7 @@ const AccountantDashboard = () => {
           </div>
         ) : null}
 
-        {(activeTab === 'Dashboard' || activeTab === 'Sales' || activeTab === 'Purchases' || activeTab === 'Advances') && (
+        {(activeTab === 'Dashboard' || activeTab === 'Sales' || activeTab === 'Purchases' || activeTab === 'Advances' || activeTab === 'Billing & Invoices' || activeTab === 'Bills' || activeTab === 'Tax Invoices') && (
           <div className="bg-white dark:bg-[#1e293b] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden flex flex-col flex-1">
             <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex justify-between items-center bg-slate-50/50 dark:bg-slate-800/50">
                <h2 className="font-bold text-lg">
@@ -1666,6 +2112,19 @@ const AccountantDashboard = () => {
                               {tx.paymentStatus === 'Paid' ? '✅' : tx.paymentStatus === 'Partial' ? '⏳' : '❌'} {tx.paymentStatus}
                             </span>
                             <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button onClick={() => handleView(tx)} className="text-xs text-slate-500 hover:text-slate-700 hover:underline cursor-pointer font-semibold bg-slate-50 dark:bg-slate-800 px-2 py-0.5 rounded transition-colors">
+                                👁️ View
+                              </button>
+                              {(activeTab === 'Billing & Invoices' || activeTab === 'Bills' || activeTab === 'Tax Invoices') && (
+                                <>
+                                  <button onClick={() => exportInvoice(tx, 'Invoice')} className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer font-semibold bg-indigo-50 dark:bg-indigo-900/30 px-2 py-0.5 rounded transition-colors">
+                                    Tax Invoice
+                                  </button>
+                                  <button onClick={() => exportInvoice(tx, 'Bill')} className="text-xs text-emerald-600 hover:text-emerald-800 hover:underline cursor-pointer font-semibold bg-emerald-50 dark:bg-emerald-900/30 px-2 py-0.5 rounded transition-colors">
+                                    Bill
+                                  </button>
+                                </>
+                              )}
                               <button onClick={() => openEditModal(tx)} className="text-xs text-indigo-500 hover:text-indigo-700 hover:underline cursor-pointer font-semibold bg-indigo-50 dark:bg-indigo-900/30 px-2 py-0.5 rounded">
                                 Edit
                               </button>
@@ -1682,6 +2141,64 @@ const AccountantDashboard = () => {
               </table>
             </div>
           </div>
+        )}
+
+        {(activeTab === 'Customers' || activeTab === 'Vendors') && (
+           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in duration-300">
+             {displayList.length === 0 ? (
+                <div className="col-span-full py-12 text-center text-slate-500 border border-slate-200 dark:border-slate-800 rounded-2xl bg-white dark:bg-[#1e293b] shadow-sm">
+                   No {activeTab.toLowerCase()} found.
+                </div>
+             ) : (
+                displayList.map(tx => {
+                   const item = getTxItems(tx)[0] || {} as any;
+                   return (
+                     <div key={tx.id} className="bg-white dark:bg-[#1e293b] rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm relative group hover:shadow-md transition-all">
+                        <div className="absolute top-4 right-4 z-10 group/menu" tabIndex={0}>
+                           <button className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors focus:outline-none">
+                              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+                           </button>
+                           <div className="hidden group-focus-within/menu:flex flex-col absolute right-0 top-full mt-1 bg-white dark:bg-[#1e293b] border border-slate-200 dark:border-slate-700 shadow-xl rounded-xl py-1 w-44 overflow-hidden transform transition-all origin-top-right">
+                              <button onClick={() => setViewingParty(tx)} className="w-full text-left px-4 py-2.5 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 transition-colors flex items-center gap-2"><span>👀</span> View History</button>
+                              <button onClick={() => {
+                                 resetForm();
+                                 setModalType(tx.type === 'Customer' ? 'Vendor' : 'Customer');
+                                 setFormPartyName(tx.partyName || '');
+                                 setFormContactPhone(item.phone || '');
+                                 setFormContactEmail(item.email || '');
+                                 setFormContactAddress1(item.address1 || '');
+                                 setFormContactAddress2(item.address2 || '');
+                                 setFormContactCountry(item.country || 'India');
+                                 setFormContactState(item.state || '');
+                                 setFormContactPin(item.pin || '');
+                                 setFormContactFax(item.fax || '');
+                                 setFormContactIdType(item.idProofType || 'None');
+                                 setFormContactIdNo(item.idProofNo || '');
+                                 setFormContactGst(item.gstNo || '');
+                                 setIsModalOpen(true);
+                              }} className="w-full text-left px-4 py-2.5 text-xs font-bold text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 transition-colors flex items-center gap-2"><span>📋</span> Copy to {tx.type === 'Customer' ? 'Vendor' : 'Customer'}</button>
+                              <button onClick={() => openEditModal(tx)} className="w-full text-left px-4 py-2.5 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors flex items-center gap-2"><span>✏️</span> Edit Details</button>
+                              <div className="h-px bg-slate-100 dark:border-slate-800 my-1 w-full"></div>
+                              <button onClick={() => deleteTx(tx.id)} className="w-full text-left px-4 py-2.5 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30 transition-colors flex items-center gap-2"><span>🗑️</span> Delete</button>
+                           </div>
+                        </div>
+                        <h3 className="font-bold text-lg mb-1 pr-10 text-slate-800 dark:text-slate-100">{tx.partyName}</h3>
+                        <div className="mt-4 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                           {item.phone && <p className="flex items-center gap-2"><span>📞</span> {item.phone}</p>}
+                           {item.email && <p className="flex items-center gap-2"><span>✉️</span> {item.email}</p>}
+                           {[item.address1, item.address2, item.pin, item.state, item.country].filter(Boolean).join(', ') && <p className="flex items-start gap-2"><span>📍</span> <span className="line-clamp-2">{[item.address1, item.address2, item.pin, item.state, item.country].filter(Boolean).join(', ')}</span></p>}
+                           {item.fax && <p className="flex items-center gap-2"><span>📠</span> {item.fax}</p>}
+                        </div>
+                        <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-wrap gap-2">
+                           <span className="text-[10px] bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-2 py-1 rounded font-bold uppercase text-slate-600 dark:text-slate-400">{item.category || (tx.type === 'Customer' ? 'Consumer' : 'Unregistered Business')}</span>
+                           {item.gstNo && <span className="text-[10px] bg-amber-50 border border-amber-200 text-amber-700 px-2 py-1 rounded font-bold uppercase">GST: {item.gstNo}</span>}
+                           {item.idProofType && item.idProofType !== 'None' && <span className="text-[10px] bg-indigo-50 border border-indigo-200 text-indigo-700 px-2 py-1 rounded font-bold uppercase">{item.idProofType}: {item.idProofNo}</span>}
+                        </div>
+                     </div>
+                   )
+                })
+             )}
+           </div>
         )}
 
         {activeTab === 'Cash Tracker' && (
@@ -1999,6 +2516,47 @@ const AccountantDashboard = () => {
                  </tbody>
                </table>
              </div>
+          </div>
+        </div>
+      )}
+      {viewingParty && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
+          <div className="bg-white dark:bg-[#1e293b] rounded-2xl w-full max-w-4xl shadow-2xl overflow-hidden border border-slate-200 dark:border-slate-700 my-8 max-h-[90vh] flex flex-col">
+            <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center shrink-0 bg-slate-50 dark:bg-slate-900/50">
+              <h3 className="font-bold text-lg flex items-center gap-2">
+                👤 {viewingParty.partyName} ({viewingParty.type}) - Transaction History
+              </h3>
+              <button onClick={() => setViewingParty(null)} className="text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer text-xl">✕</button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+               <table className="w-full text-left whitespace-nowrap">
+                 <thead>
+                   <tr className="bg-slate-100/50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 text-xs uppercase tracking-wider font-semibold">
+                     <th className="px-6 py-4">Date</th>
+                     <th className="px-6 py-4">Type</th>
+                     <th className="px-6 py-4">Items</th>
+                     <th className="px-6 py-4">Total Value</th>
+                     <th className="px-6 py-4 text-right">Action</th>
+                   </tr>
+                 </thead>
+                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                   {transactions.filter(t => t.partyName === viewingParty.partyName && t.type !== 'Customer' && t.type !== 'Vendor').length === 0 ? (
+                      <tr><td colSpan={5} className="text-center py-6 text-slate-500">No transactions found.</td></tr>
+                   ) : transactions.filter(t => t.partyName === viewingParty.partyName && t.type !== 'Customer' && t.type !== 'Vendor').map(tx => (
+                     <tr key={tx.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group">
+                       <td className="px-6 py-4 text-sm">{tx.date}</td>
+                       <td className="px-6 py-4"><span className="px-2 py-1 rounded text-[10px] font-bold uppercase bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-400">{tx.type}</span></td>
+                       <td className="px-6 py-4 text-sm">{getTxItems(tx).length} items</td>
+                       <td className="px-6 py-4 text-sm font-mono text-slate-800 dark:text-slate-200">₹{getTxTotalSelling(tx) || getTxTotalPurchase(tx) || tx.paymentRecords[0]?.amount || 0}</td>
+                       <td className="px-6 py-4 text-right">
+                          <button onClick={() => { setViewingParty(null); openEditModal(tx); }} className="text-xs text-indigo-500 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded transition-colors opacity-0 group-hover:opacity-100">Edit Tx</button>
+                       </td>
+                     </tr>
+                   ))}
+                 </tbody>
+               </table>
+            </div>
           </div>
         </div>
       )}
