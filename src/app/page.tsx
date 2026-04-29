@@ -481,7 +481,7 @@ const AccountantDashboard = () => {
            idProofNo: formContactIdNo,
        };
        if (existingCustomer) {
-           const existingItem = existingCustomer.items ? existingCustomer.items[0] : {};
+           const existingItem = getTxItems(existingCustomer)[0];
            cItem.email = existingItem.email || formContactEmail;
            cItem.gstNo = existingItem.gstNo || formContactGst;
            cItem.address2 = existingItem.address2 || formContactAddress2;
